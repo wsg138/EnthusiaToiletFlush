@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test
 import java.util.UUID
 
 /**
- * REQ-001, REQ-005, REQ-052, REQ-060, REQ-061, REQ-062.
+ * REQ-001, REQ-005, REQ-023, REQ-052, REQ-060, REQ-061, REQ-062.
  *
  * Pure-application command logic — no Brigadier here. The actual
  * Brigadier-bound `SchedRestartCommand` (`infrastructure/command/`) is a
@@ -21,6 +21,29 @@ class SchedRestartCommandHandlerTest {
     private val survival = ServerId("survival")
     private val creative = ServerId("creative")
     private val hub = ServerId("lobby")
+    private val proxy = ProxyRestartService.TARGET
+
+    private class FakeProxyRestart : ProxyRestartController {
+        override var state: RestartState = RestartState.IDLE
+            private set
+
+        var armedDurationSeconds: Int? = null
+            private set
+
+        override fun arm(durationSeconds: Int): Boolean {
+            if (state != RestartState.IDLE) return false
+            armedDurationSeconds = durationSeconds
+            state = RestartState.ARMED
+            return true
+        }
+
+        override fun cancel(): Boolean {
+            if (state != RestartState.ARMED && state != RestartState.COUNTDOWN) return false
+            state = RestartState.IDLE
+            armedDurationSeconds = null
+            return true
+        }
+    }
 
     private fun cohort(name: String) = Cohort(setOf(
         CohortMember(PlayerId(UUID.nameUUIDFromBytes(name.toByteArray()))),
@@ -29,17 +52,41 @@ class SchedRestartCommandHandlerTest {
     private fun handler(
         companionOn: Set<ServerId> = setOf(survival, creative),
         cohorts: Map<ServerId, Cohort> = mapOf(survival to cohort("p"), creative to cohort("p")),
+        proxyRestart: ProxyRestartController? = FakeProxyRestart(),
     ) = SchedRestartCommandHandler(
         registry = CoordinatorRegistry(),
         hubServer = hub,
         companionPresent = { it in companionOn },
         cohortFor = { cohorts[it] ?: Cohort(emptySet()) },
+        proxyRestart = proxyRestart,
     )
 
     @Test
     fun `arm valid target returns Armed`() {
         val result = handler().arm(survival, durationMinutes = 5)
         assertThat(result).isEqualTo(SchedCommandResult.Armed(survival, 300))
+    }
+
+    @Test
+    fun `arm proxy target uses proxy lifecycle instead of companion lookup (REQ-023)`() {
+        val proxyRestart = FakeProxyRestart()
+        val result = handler(companionOn = emptySet(), proxyRestart = proxyRestart)
+            .arm(proxy, durationMinutes = 5)
+
+        assertThat(result).isEqualTo(SchedCommandResult.Armed(proxy, 300))
+        assertThat(proxyRestart.armedDurationSeconds).isEqualTo(300)
+    }
+
+    @Test
+    fun `second proxy arm is rejected while active`() {
+        val h = handler()
+        h.arm(proxy, 5)
+
+        val result = h.arm(proxy, 10)
+
+        assertThat(result).isInstanceOf(SchedCommandResult.Rejected::class.java)
+        assertThat((result as SchedCommandResult.Rejected).reason)
+            .containsIgnoringCase("already")
     }
 
     @Test
@@ -77,6 +124,16 @@ class SchedRestartCommandHandlerTest {
     }
 
     @Test
+    fun `cancel proxy restart returns Cancelled`() {
+        val h = handler()
+        h.arm(proxy, 5)
+
+        val result = h.cancel(proxy)
+
+        assertThat(result).isEqualTo(SchedCommandResult.Cancelled(proxy))
+    }
+
+    @Test
     fun `cancel from idle is rejected`() {
         val result = handler().cancel(survival)
         assertThat(result).isInstanceOf(SchedCommandResult.Rejected::class.java)
@@ -91,6 +148,16 @@ class SchedRestartCommandHandlerTest {
         assertThat(result).isInstanceOf(SchedCommandResult.Status::class.java)
         val states = (result as SchedCommandResult.Status).states
         assertThat(states[survival]).isEqualTo(RestartState.ARMED)
+    }
+
+    @Test
+    fun `status includes active proxy restart`() {
+        val h = handler()
+        h.arm(proxy, 5)
+
+        val states = (h.status() as SchedCommandResult.Status).states
+
+        assertThat(states[proxy]).isEqualTo(RestartState.ARMED)
     }
 
     @Test
