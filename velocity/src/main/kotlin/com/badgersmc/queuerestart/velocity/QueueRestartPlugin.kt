@@ -19,6 +19,7 @@ import com.badgersmc.queuerestart.velocity.application.schedule.BackendScheduleC
 import com.badgersmc.queuerestart.velocity.application.schedule.BackendScheduleSync
 import com.badgersmc.queuerestart.velocity.application.schedule.CoordinatorRegistry
 import com.badgersmc.queuerestart.velocity.application.schedule.CountdownBroadcaster
+import com.badgersmc.queuerestart.velocity.application.schedule.ProxyRestartService
 import com.badgersmc.queuerestart.velocity.application.schedule.QRestartAdminCommandHandler
 import com.badgersmc.queuerestart.velocity.application.schedule.RestartOrchestrator
 import com.badgersmc.queuerestart.velocity.application.schedule.SchedRestartCommandHandler
@@ -40,6 +41,7 @@ import com.badgersmc.queuerestart.velocity.infrastructure.schedule.CronUtilsSche
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.ProxyAdapter
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.ProxyPingArmResponder
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.QueueAdapter
+import com.badgersmc.queuerestart.velocity.infrastructure.velocity.VelocityProxyLifecycleAdapter
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.VelocityProxyServerBackend
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.VelocityQueueManagerBackend
 import com.google.inject.Inject
@@ -94,6 +96,7 @@ class QueueRestartPlugin @Inject constructor(
         // ── infrastructure adapters ──────────────────────────────────────
         val clock = SystemClockAdapter()
         val audience: AudiencePort = AdventureAudienceAdapter(proxy)
+        val proxyLifecycle = VelocityProxyLifecycleAdapter(proxy, logger)
         val proxyBackend = VelocityProxyServerBackend(proxy, logger)
         val proxyPort: ProxyPort = ProxyAdapter(proxyBackend)
         val queueBackend = VelocityQueueManagerBackend(proxy, logger)
@@ -130,6 +133,20 @@ class QueueRestartPlugin @Inject constructor(
                         "queue-restart: {} countdown mark fired (T-{}s)",
                         target.value, secondsRemaining,
                     )
+                }
+            },
+        )
+        val proxyRestart = ProxyRestartService(
+            lifecycle = proxyLifecycle,
+            marksSupplier = { cfgSnapshot().countdown.marksSeconds },
+            warningMessageSupplier = { cfgSnapshot().countdown.message },
+            hubSupplier = { cfgSnapshot().hubServer },
+            soundResolver = { secondsRemaining -> resolveSound(cfgSnapshot(), secondsRemaining) },
+            onMark = { secondsRemaining, isT0 ->
+                if (isT0) {
+                    logger.info("queue-restart: proxy T-0 reached — shutting down Velocity")
+                } else {
+                    logger.info("queue-restart: proxy countdown mark fired (T-{}s)", secondsRemaining)
                 }
             },
         )
@@ -177,6 +194,7 @@ class QueueRestartPlugin @Inject constructor(
             hubServer = cfgSnapshot().hubServer,
             companionPresent = ::companionPresentFor,
             cohortFor = { target -> cohortFromCurrentRoster(target, proxyPort) },
+            proxyRestart = proxyRestart,
         )
         val scheduleService = ScheduleService(
             scheduler = schedulerPort,
@@ -213,6 +231,7 @@ class QueueRestartPlugin @Inject constructor(
             try {
                 cronScheduler.tick(now)
                 orchestrator.tick(now)
+                proxyRestart.tick(now)
                 pingPoller.tick(now)
                 scheduleDiscoveryPoller.tick(now)
                 rejoinService.tick(now.epochSecond)
@@ -222,9 +241,10 @@ class QueueRestartPlugin @Inject constructor(
         }).repeat(Duration.ofSeconds(1)).schedule()
 
         logger.info(
-            "queue-restart ready. hub={}, channel={} (schedules learned from backends via SLP)",
+            "queue-restart ready. hub={}, channel={}, proxy-target={} (schedules learned from backends via SLP)",
             cfgSnapshot().hubServer.value,
             VelocityChannelTransport.CHANNEL,
+            ProxyRestartService.TARGET.value,
         )
     }
 
