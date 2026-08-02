@@ -1,0 +1,49 @@
+name: build reviewed v0.1.5 jars
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.head_ref == 'agent/build-v0.1.5-reviewed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 394ebec915ff7f86e16f8b39a812de5203da5704
+          fetch-depth: 0
+
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Test and build exact reviewed commit
+        run: |
+          chmod +x ./gradlew
+          ./gradlew check shadowJar --no-daemon -PreleaseVersion=0.1.5
+          mkdir -p reviewed-jars
+          cp velocity/build/libs/velocity-0.1.5.jar reviewed-jars/EnthusiaToiletFlush-Velocity-0.1.5.jar
+          cp paper-companion/build/libs/paper-companion-0.1.5.jar reviewed-jars/EnthusiaToiletFlush-PaperCompanion-0.1.5.jar
+          unzip -p reviewed-jars/EnthusiaToiletFlush-Velocity-0.1.5.jar velocity-plugin.json | grep -F '"version": "0.1.5"'
+          unzip -p reviewed-jars/EnthusiaToiletFlush-PaperCompanion-0.1.5.jar plugin.yml | grep -F 'version: 0.1.5'
+          (cd reviewed-jars && sha256sum *.jar > EnthusiaToiletFlush-0.1.5-SHA256SUMS.txt)
+          cat > reviewed-jars/EnthusiaToiletFlush-0.1.5-BUILD.txt <<'EOF'
+          Source repository: https://github.com/wsg138/EnthusiaToiletFlush
+          Source commit: 394ebec915ff7f86e16f8b39a812de5203da5704
+          Version: 0.1.5
+          Java: 21
+          Validation: ./gradlew check shadowJar --no-daemon -PreleaseVersion=0.1.5
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: EnthusiaToiletFlush-reviewed-0.1.5
+          path: reviewed-jars/
+          retention-days: 7
