@@ -32,8 +32,9 @@ jobs:
           rm -rf .github/drain-fix-parts
           python3 - <<'PY'
           from pathlib import Path
-          path = Path("velocity/src/main/kotlin/com/badgersmc/queuerestart/velocity/QueueRestartPlugin.kt")
-          text = path.read_text()
+
+          plugin = Path("velocity/src/main/kotlin/com/badgersmc/queuerestart/velocity/QueueRestartPlugin.kt")
+          text = plugin.read_text()
           old = "        val networkControl = VelocityNetworkControl(proxy) { cfgSnapshot().accessMessages }"
           new = """        val networkControl = VelocityNetworkControl(
               proxy = proxy,
@@ -41,7 +42,18 @@ jobs:
           )"""
           if old not in text:
               raise SystemExit("expected network control wiring not found")
-          path.write_text(text.replace(old, new, 1))
+          plugin.write_text(text.replace(old, new, 1))
+
+          build = Path("velocity/build.gradle.kts")
+          text = build.read_text()
+          old = """    testImplementation(project(\":common\"))
+              testImplementation(\"com.lemonappdev:konsist:0.17.3\")"""
+          new = """    testImplementation(project(\":common\"))
+              testImplementation(\"com.velocityctd:velocity-api:3.5.0-SNAPSHOT\")
+              testImplementation(\"com.lemonappdev:konsist:0.17.3\")"""
+          if old not in text:
+              raise SystemExit("expected test dependency block not found")
+          build.write_text(text.replace(old, new, 1))
           PY
 
       - name: Validate modified tree
