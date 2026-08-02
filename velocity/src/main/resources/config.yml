@@ -41,12 +41,10 @@ sounds:
   tick: { key: ui.button.click,          volume: 0.7, pitch: 1.0 }   # 10..1s
   t0:   { key: block.beacon.deactivate,  volume: 0.6, pitch: 1.0 }
 
-schedules:
-  survival-nightly:
-    server: survival
-    cron: "0 4 * * *"
-    warn-minutes: 20
-  creative-weekly:
-    server: creative
-    cron: "0 5 * * 1"
-    warn-minutes: 15
+# Daily Velocity restart times. Leave empty to disable automatic proxy
+# restarts and use `/schedrestart <minutes> proxy` only. Times are the actual
+# shutdown time; the countdown starts `warn-minutes` before each entry.
+proxy-restart:
+  restart-times: []                 # example: ["04:00"]
+  time-zone: "America/New_York"
+  warn-minutes: 20
