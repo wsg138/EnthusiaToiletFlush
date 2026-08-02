@@ -2,7 +2,6 @@ package com.badgersmc.queuerestart.velocity.application.schedule
 
 import com.badgersmc.queuerestart.common.schedule.BackendSchedule
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
-import java.time.LocalTime
 
 /**
  * Subscribes to a [BackendScheduleCache] and reloads [ScheduleService] each
@@ -11,20 +10,29 @@ import java.time.LocalTime
  * backend-advertised zone — so the proxy's countdown UX fires `warnMinutes`
  * before each backend's locally-scheduled `Bukkit.shutdown()`.
  *
+ * [additionalDefinitions] supplies proxy-owned schedules that do not come
+ * from Paper companions, notably the Velocity process's own restart times.
+ *
  * Schedule names are deterministic (`<server>-<HH:mm>`) so re-translations
  * are stable across announce cycles.
  */
 class BackendScheduleSync(
     private val cache: BackendScheduleCache,
     private val scheduleService: ScheduleService,
+    private val additionalDefinitions: () -> List<ScheduleDefinition> = { emptyList() },
 ) {
 
     fun start() {
         cache.subscribe { snapshot -> applyToService(snapshot) }
     }
 
+    /** Rebuild cron registrations after proxy-side config reload. */
+    fun refresh() {
+        applyToService(cache.snapshot())
+    }
+
     private fun applyToService(snapshot: Map<ServerId, BackendSchedule>) {
-        scheduleService.reload(toDefinitions(snapshot))
+        scheduleService.reload(toDefinitions(snapshot) + additionalDefinitions())
     }
 
     private fun toDefinitions(snapshot: Map<ServerId, BackendSchedule>): List<ScheduleDefinition> {
