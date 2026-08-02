@@ -11,9 +11,9 @@ sealed interface AdminCommandResult {
 /**
  * REQ-050, REQ-051.
  *
- * `/qrestart reload` reparses config and rebuilds cron registrations —
- * does NOT touch in-flight RestartCoordinator state machines, so an
- * armed countdown survives a reload.
+ * `/qrestart reload` reparses config and invokes [onReload] so proxy-owned
+ * schedule registrations and permission probes can be rebuilt. It does NOT
+ * touch in-flight restart state, so an armed countdown survives a reload.
  *
  * `/qrestart trigger <name>` looks up the schedule by name and arms its
  * restart immediately by delegating to [SchedRestartCommandHandler.arm]
@@ -27,9 +27,7 @@ class QRestartAdminCommandHandler(
      * SECURITY (REQ-090): callback fired after [ConfigPort.reload] so the
      * infrastructure layer can re-derive any state that depends on the
      * snapshot — notably the `VelocityProxyServerBackend.withRankLadder`
-     * probe set. Without this, a rank-ladder edit + /qrestart reload
-     * leaves new nodes unprobed and players slip through with default
-     * queue weights.
+     * probe set and configured proxy restart schedules.
      */
     private val onReload: () -> Unit = {},
 ) {
@@ -37,10 +35,9 @@ class QRestartAdminCommandHandler(
     fun reload(): AdminCommandResult {
         config.reload()
         onReload()
-        // Schedules are owned by the backends and discovered via SLP — the
-        // discovery poller refreshes them on its own cadence, so /qrestart
-        // reload only needs to reparse proxy-side settings (countdown
-        // messages, rank ladder, etc.). Cron entries stay untouched here.
+        // Backend schedules remain sourced from companions via SLP. The
+        // callback refreshes proxy-owned schedules from the new config while
+        // preserving those cached backend definitions.
         return AdminCommandResult.Reloaded
     }
 
