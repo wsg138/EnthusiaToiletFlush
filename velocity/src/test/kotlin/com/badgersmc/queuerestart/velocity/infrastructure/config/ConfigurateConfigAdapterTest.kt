@@ -8,12 +8,15 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.LocalTime
+import java.time.ZoneId
 
 /**
  * REQ-006 + impl §8.
  *
  * Covers:
  *  - canonical sample loads to a fully populated [QueueRestartConfig]
+ *  - proxy restart times, time zone, and warning lead are parsed
  *  - sound volume > 1.0 rejected with a clear error
  *  - sound volume > 0.8 (but ≤ 1.0) emits a warning via the supplied logger
  *  - malformed YAML rejected
@@ -48,11 +51,10 @@ class ConfigurateConfigAdapterTest {
         sounds:
           warn:  { key: block.note_block.bell, volume: 0.4, pitch: 1.0 }
           tick:  { key: ui.button.click,       volume: 0.7, pitch: 1.0 }
-        schedules:
-          nightly:
-            server: survival
-            cron: "0 4 * * *"
-            warn-minutes: 20
+        proxy-restart:
+          restart-times: ["04:00", "16:30"]
+          time-zone: "America/New_York"
+          warn-minutes: 20
     """.trimIndent()
 
     private fun yaml(@TempDir dir: Path, content: String): Path {
@@ -77,6 +79,43 @@ class ConfigurateConfigAdapterTest {
         assertThat(cfg.sounds["tick"]!!.volume).isEqualTo(0.7f)
         assertThat(cfg.rankLadder["group.owner"]).isEqualTo(1000)
         assertThat(cfg.rankDefault).isEqualTo(0)
+        assertThat(cfg.proxyRestart.restartTimes)
+            .containsExactly(LocalTime.of(4, 0), LocalTime.of(16, 30))
+        assertThat(cfg.proxyRestart.zone).isEqualTo(ZoneId.of("America/New_York"))
+        assertThat(cfg.proxyRestart.warnMinutes).isEqualTo(20)
+    }
+
+    @Test
+    fun `missing proxy restart block defaults to disabled schedule`(@TempDir dir: Path) {
+        val withoutProxy = canonical.replace(
+            Regex("(?ms)^proxy-restart:\n(?:  .*\n?)*$"),
+            "",
+        )
+
+        val cfg = ConfigurateConfigAdapter(yaml(dir, withoutProxy), warner = {}).snapshot()
+
+        assertThat(cfg.proxyRestart.restartTimes).isEmpty()
+        assertThat(cfg.proxyRestart.warnMinutes).isEqualTo(20)
+    }
+
+    @Test
+    fun `invalid proxy restart time is rejected`(@TempDir dir: Path) {
+        val bad = canonical.replace("\"04:00\"", "\"not-a-time\"")
+
+        assertThatThrownBy {
+            ConfigurateConfigAdapter(yaml(dir, bad), warner = {}).snapshot()
+        }.isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("restart-time")
+    }
+
+    @Test
+    fun `invalid proxy restart time zone is rejected`(@TempDir dir: Path) {
+        val bad = canonical.replace("America/New_York", "Not/A_Zone")
+
+        assertThatThrownBy {
+            ConfigurateConfigAdapter(yaml(dir, bad), warner = {}).snapshot()
+        }.isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("time-zone")
     }
 
     @Test
