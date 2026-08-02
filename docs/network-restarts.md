@@ -17,8 +17,8 @@ backend or another restart plugin.
 
 ## Pterodactyl setup
 
-1. Install the Velocity jar on the proxy and the existing Paper companion jar
-   on every backend. Do not install the Velocity jar on backends.
+1. Install the Velocity jar on the proxy and the Paper companion jar on every
+   backend. Do not install the Velocity jar on backends.
 2. In Pterodactyl, create a Client API key with access only to the configured
    proxy and Minecraft backend servers.
 3. Provide it to the Velocity process as `PTERODACTYL_API_KEY`. Leave
@@ -35,32 +35,38 @@ backend or another restart plugin.
 
 The executor uses Pterodactyl's Client API with HTTPS, bounded timeouts, no
 redirects, and no retry of an uncertain restart power action. A rejected or
-failed request leaves Velocity running, removes the temporary maintenance
-lock, and records the failed plan. There is intentionally no local-shutdown
-fallback presented as a substitute for an externally managed proxy restart.
+failed request leaves Velocity running, clears any active maintenance lock,
+and records the failed plan. There is intentionally no local-shutdown fallback
+presented as a substitute for an externally managed proxy restart.
 
 ## Safe deployment and dry run
 
 1. Fill in Velocity server names, Pterodactyl identifiers, and the explicit
    full-network member list.
 2. Set `enabled: true` and `executor: DRY_RUN`; reload the plugin.
-3. Test a backend: `/schedrestart SMP 2m`.
-4. Test a proxy countdown: `/schedrestart proxy 30s`; confirm the warnings and
-   disconnect screen without a real power action.
-5. Test a network countdown: `/schedrestart network 30s`; verify only the
-   configured members are listed and the maintenance login message appears.
-6. Verify `/nextrestart` and `/restartschedule` show only public plans.
-7. Set `executor: PTERODACTYL`, reload, and test one non-critical backend
-   before proxy or full-network restarts.
+3. Trigger the configured proxy or network schedule and verify countdown
+   messages, plan creation, status commands, and persistence.
+4. Confirm that DRY_RUN does not transfer or disconnect players, enable
+   maintenance mode, contact Pterodactyl, or issue power actions.
+5. Verify `/nextrestart` and `/restartschedule` show only public plans.
+6. Set `executor: PTERODACTYL`, reload, and first test one non-critical backend.
+7. Test a short proxy restart during a maintenance window, then test the full
+   network sequence only after the proxy and backend identifiers are verified.
 
-`DRY_RUN` executes validation, countdowns, maintenance, transfers, and the
-restart sequence, but never sends a Pterodactyl power request.
+`DRY_RUN` is intentionally non-disruptive. It validates scheduling and
+countdown behavior, records a completed dry-run plan, and performs no player or
+server lifecycle actions.
 
 ## Recurring schedules and migration
 
 The default sample schedules SMP at midnight Monday through Saturday and a
 full-network restart at midnight Sunday in `America/Indiana/Indianapolis`.
 Each has a two-hour warning window, so warnings begin at 10:00 PM.
+
+Automatic schedules run only when `network-restart.enabled` is `true`. Real
+proxy and full-network restarts additionally require `executor: PTERODACTYL`,
+a valid `PTERODACTYL_API_KEY`, and correct panel identifiers for every listed
+member and the proxy.
 
 To migrate from a previous restart plugin, disable its automatic schedules and
 remove its Velocity restart commands before enabling ToiletFlush schedules.
@@ -73,11 +79,13 @@ Plans are persisted in `network-restarts.state` using atomic replacement.
 Future plans resume after a proxy restart. Overdue plans are marked missed.
 Plans interrupted during preflight, transfer, or dispatch are marked
 `NEEDS_REVIEW` and are never replayed automatically, preventing restart loops.
-The temporary maintenance lock is cleared on startup and expires automatically
-after a failed dispatch.
 
-If a proxy or network plan fails preflight, no power actions are sent. If a
-full-network restart has already sent some accepted actions before a later
-failure, the plan records the independent target outcomes and does not retry
-accepted actions. Check the proxy log for the plan identifier and Pterodactyl
-HTTP status; no API key is written to logs or state.
+If preflight fails, no power actions are sent. If a non-hub backend restart is
+rejected after preflight, the sequence stops before hubs are disconnected or
+Velocity is restarted. Any earlier accepted action is recorded and is never
+retried automatically. After an accepted proxy restart request, the old proxy
+keeps its login maintenance gate until it exits; if it does not exit, the gate
+expires after `maintenance-failure-expiry-seconds`.
+
+Check the proxy log for the plan identifier and Pterodactyl HTTP status. API
+keys are not written to logs or restart-state files.
