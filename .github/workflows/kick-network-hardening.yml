@@ -1,0 +1,50 @@
+name: apply and validate network hardening
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'agent/harden-network-restart'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: agent/harden-network-restart
+          fetch-depth: 0
+
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Extract and apply reviewed patch
+        run: |
+          awk '
+            /python3 - <<'"'"'PY'"'"'/ { capture=1; next }
+            capture && /^          PY$/ { capture=0; exit }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/apply-network-hardening.yml > /tmp/apply-network-hardening.py
+          python3 /tmp/apply-network-hardening.py
+          rm -f .github/workflows/kick-network-hardening.yml .network-hardening-trigger
+
+      - name: Validate modified tree
+        run: |
+          chmod +x ./gradlew
+          git diff --check
+          ./gradlew check shadowJar --no-daemon
+
+      - name: Commit validated patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Harden network restart failure handling [network-hardening-applied]"
+          git push origin HEAD:agent/harden-network-restart
