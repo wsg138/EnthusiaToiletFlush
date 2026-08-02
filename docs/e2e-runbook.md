@@ -33,7 +33,8 @@ backend restart plus the dedicated Velocity proxy restart path.
 2. Watch the proxy log for:
    - `[queue-restart] config loaded from plugins/queue-restart/config.yml`
    - no `sound volume` warnings (default suite stays under 0.8).
-   - `queue-restart ready` including `proxy-target=proxy`.
+   - `queue-restart ready` including `proxy-target=proxy` and the expected
+     `proxy-schedules=<count>`.
 3. Watch each backend log for:
    - `[queue-restart-companion] enabled` and either
      `CheckHacks integration: present` or `CheckHacks integration: absent`.
@@ -76,7 +77,29 @@ backend restart plus the dedicated Velocity proxy restart path.
    `/schedrestart cancel proxy`; status must no longer contain an active
    proxy countdown and Velocity must remain online past the original T-0.
 
-## 5. CheckHacks gate (optional, requires CheckHacks-fork PR)
+## 5. Automatic proxy schedule and reload
+
+1. Set a restart time a few minutes ahead in the proxy config:
+
+   ```yaml
+   proxy-restart:
+     restart-times: ["HH:mm"]
+     time-zone: "America/New_York"
+     warn-minutes: 1
+   ```
+
+2. Run `/qrestart reload`.
+3. Run `/qrestart trigger proxy-HH:mm` to confirm the deterministic schedule
+   name is registered, then cancel it with `/schedrestart cancel proxy`.
+4. Wait for the cron start minute. The proxy countdown must arm one minute
+   before the configured shutdown time and reach T-0 at `HH:mm` in the
+   configured time zone.
+5. After the proxy relaunches, remove the test time and run `/qrestart reload`.
+   `/qrestart trigger proxy-HH:mm` must then report an unknown schedule.
+6. Confirm backend schedule names remain available after both reloads; the
+   proxy-owned schedule refresh must not erase SLP-discovered definitions.
+
+## 6. CheckHacks gate (optional, requires CheckHacks-fork PR)
 
 1. With CheckHacks-fork installed, repeat §2 against `survival`.
 2. While players sit on `lobby` waiting to be released, run a CheckHacks
@@ -86,7 +109,7 @@ backend restart plus the dedicated Velocity proxy restart path.
 5. Wait `check-gate-timeout-seconds` (default 60s) without firing the
    event → released (because `release-on-timeout: true`).
 
-## 6. Negative / safety paths
+## 7. Negative / safety paths
 
 | Action | Expected |
 |---|---|
@@ -100,10 +123,11 @@ backend restart plus the dedicated Velocity proxy restart path.
 | Player with `queuerestart.bypass.drain` on `survival` during drain | not transferred — REQ-014 |
 | Player with `queuerestart.bypass.checkhacks` after restart | released without waiting — REQ-043 |
 | `/qrestart reload` mid-countdown | reload OK, countdown unaffected — REQ-050 |
+| `/qrestart trigger proxy-HH:mm` after removing that time | rejected as unknown schedule — REQ-023/051 |
 | `/qrestart trigger nightly` | arms survival immediately — REQ-051 |
 | Crash hub between drain and restart | proxy iterates `fallback-hubs`, drain continues — REQ-013 |
 
-## 7. Rollback
+## 8. Rollback
 
 If any test fails irreversibly, drop the plugin jars from `plugins/`,
 restart the proxy, and `git revert` the failing commit on the project
