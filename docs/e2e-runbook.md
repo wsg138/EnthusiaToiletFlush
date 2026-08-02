@@ -1,7 +1,7 @@
 # End-to-end manual verification runbook
 
 Covers implementation.md §1, §5 — the full state cycle of one armed
-restart, exercised against a dev proxy with two backends + a hub.
+backend restart plus the dedicated Velocity proxy restart path.
 
 ## Prereqs
 
@@ -16,15 +16,16 @@ restart, exercised against a dev proxy with two backends + a hub.
   - test "default" account: no rank perms.
 - (Optional) CheckHacks-fork installed on backends to verify gate flow —
   pending the PR in `docs/checkhacks-fork-pr.md`.
-- **Auto-restart on clean exit must be enabled for every backend.** The
-  companion calls `Bukkit.shutdown()` to restart — the JVM exits cleanly
-  and the supervisor relaunches it. Without auto-restart the server just
-  stays down after the first scheduled restart.
-  - **Bloom / Pterodactyl panels:** flip *Misc Options → Crash Detection*
-    ON. The panel treats a normal Bukkit exit as a crash and relaunches.
-  - **Local / bare-metal:** wrap your launch command in a loop (see
+- **Auto-restart on clean exit must be enabled for every backend and the
+  Velocity proxy.** The companion calls `Bukkit.shutdown()` for a backend,
+  while the proxy plugin calls `ProxyServer.shutdown(reason)` for Velocity.
+  Both JVMs exit cleanly and require a supervisor to relaunch them.
+  - **Bloom / Pterodactyl panels:** enable the relevant automatic restart or
+    crash-detection behavior for each process, and verify it also relaunches
+    a process that exits with code 0.
+  - **Local / bare-metal:** wrap each launch command in a loop (see
     `test_net/lobby2/launch-windows.bat` for the Windows pattern).
-  - **systemd:** `Restart=always` on the unit.
+  - **systemd:** `Restart=always` on each unit.
 
 ## 1. Boot smoke test
 
@@ -32,13 +33,12 @@ restart, exercised against a dev proxy with two backends + a hub.
 2. Watch the proxy log for:
    - `[queue-restart] config loaded from plugins/queue-restart/config.yml`
    - no `sound volume` warnings (default suite stays under 0.8).
-   - `cron schedules registered: …` — should list the two schedules from
-     `config.yml`.
+   - `queue-restart ready` including `proxy-target=proxy`.
 3. Watch each backend log for:
    - `[queue-restart-companion] enabled` and either
      `CheckHacks integration: present` or `CheckHacks integration: absent`.
 
-## 2. Armed → countdown → drain → restart
+## 2. Armed → countdown → drain → backend restart
 
 1. As op: `/server survival`, then `/schedrestart 1`.
 2. Expect chat: `Server <yellow>survival</yellow> restarts in <yellow>1m</yellow>`
@@ -60,7 +60,23 @@ restart, exercised against a dev proxy with two backends + a hub.
 4. Owner (weight 1000) gets in before default (weight 0).
 5. Coordinator returns to IDLE.
 
-## 4. CheckHacks gate (optional, requires CheckHacks-fork PR)
+## 4. Velocity proxy restart
+
+1. Confirm the proxy's process supervisor is configured to relaunch a clean
+   exit before performing this test.
+2. From console or an authorized player, run `/schedrestart 1 proxy`.
+3. `/schedrestart status` must show `proxy → ARMED` or `proxy → COUNTDOWN`.
+4. Every connected player, regardless of backend, receives the configured
+   countdown warning and sounds at 60s, 30s, 10..1s.
+5. At T-0 every player receives `Proxy restarting now. Reconnect shortly.`
+   and is disconnected with the same intent in the kick reason.
+6. Proxy log includes `cleanly shutting down Velocity for scheduled proxy restart`.
+7. The supervisor relaunches Velocity and players can reconnect.
+8. Repeat with `/schedrestart 1 proxy`, then run
+   `/schedrestart cancel proxy`; status must no longer contain an active
+   proxy countdown and Velocity must remain online past the original T-0.
+
+## 5. CheckHacks gate (optional, requires CheckHacks-fork PR)
 
 1. With CheckHacks-fork installed, repeat §2 against `survival`.
 2. While players sit on `lobby` waiting to be released, run a CheckHacks
@@ -70,22 +86,24 @@ restart, exercised against a dev proxy with two backends + a hub.
 5. Wait `check-gate-timeout-seconds` (default 60s) without firing the
    event → released (because `release-on-timeout: true`).
 
-## 5. Negative / safety paths
+## 6. Negative / safety paths
 
 | Action | Expected |
 |---|---|
 | `/schedrestart 5 lobby` | rejected — REQ-060 |
 | Run `/schedrestart 5` on `survival` twice in a row | second rejected — REQ-061 |
+| Run `/schedrestart 5 proxy` twice in a row | second rejected — REQ-023/061 |
 | Stop the companion on `survival`, then `/schedrestart 5` | rejected — REQ-062 |
 | `/schedrestart cancel` while ARMED | broadcast `restart cancelled` — REQ-005 |
-| `/schedrestart cancel` while IDLE | rejected |
+| `/schedrestart cancel proxy` while proxy is IDLE | rejected — REQ-023 |
+| `/schedrestart cancel` while backend is IDLE | rejected |
 | Player with `queuerestart.bypass.drain` on `survival` during drain | not transferred — REQ-014 |
 | Player with `queuerestart.bypass.checkhacks` after restart | released without waiting — REQ-043 |
 | `/qrestart reload` mid-countdown | reload OK, countdown unaffected — REQ-050 |
 | `/qrestart trigger nightly` | arms survival immediately — REQ-051 |
 | Crash hub between drain and restart | proxy iterates `fallback-hubs`, drain continues — REQ-013 |
 
-## 6. Rollback
+## 7. Rollback
 
 If any test fails irreversibly, drop the plugin jars from `plugins/`,
 restart the proxy, and `git revert` the failing commit on the project
