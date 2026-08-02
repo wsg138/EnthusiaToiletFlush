@@ -30,6 +30,19 @@ jobs:
           base64 --decode /tmp/drain-fix.b64 > /tmp/drain-fix.tar.gz
           tar -xzf /tmp/drain-fix.tar.gz
           rm -rf .github/drain-fix-parts
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("velocity/src/main/kotlin/com/badgersmc/queuerestart/velocity/QueueRestartPlugin.kt")
+          text = path.read_text()
+          old = "        val networkControl = VelocityNetworkControl(proxy) { cfgSnapshot().accessMessages }"
+          new = """        val networkControl = VelocityNetworkControl(
+              proxy = proxy,
+              accessMessages = { cfgSnapshot().accessMessages },
+          )"""
+          if old not in text:
+              raise SystemExit("expected network control wiring not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Validate modified tree
         run: |
