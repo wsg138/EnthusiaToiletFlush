@@ -1,0 +1,64 @@
+name: build final reviewed deployment jars
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.head_ref == 'agent/build-final-reviewed-jars'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 0e9596123ce75af86664507e15a99e82e2a96b8e
+          fetch-depth: 0
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - name: Resolve artifact version
+        id: version
+        run: |
+          TAGGED=$(git tag --points-at 0e9596123ce75af86664507e15a99e82e2a96b8e | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [ -n "$TAGGED" ]; then
+            VERSION="${TAGGED#v}"
+          else
+            LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+            if [ -z "$LATEST" ]; then
+              VERSION="0.1.1"
+            else
+              BASE="${LATEST#v}"
+              MAJOR=$(echo "$BASE" | cut -d. -f1)
+              MINOR=$(echo "$BASE" | cut -d. -f2)
+              PATCH=$(echo "$BASE" | cut -d. -f3)
+              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building reviewed commit as version $VERSION"
+      - name: Test and build exact merged commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew check shadowJar --no-daemon -PreleaseVersion="$VERSION"
+          mkdir -p dist
+          cp "velocity/build/libs/velocity-$VERSION.jar" "dist/EnthusiaToiletFlush-Velocity-$VERSION.jar"
+          cp "paper-companion/build/libs/paper-companion-$VERSION.jar" "dist/EnthusiaToiletFlush-PaperCompanion-$VERSION.jar"
+          unzip -p "dist/EnthusiaToiletFlush-Velocity-$VERSION.jar" velocity-plugin.json | grep -F "\"version\": \"$VERSION\""
+          unzip -p "dist/EnthusiaToiletFlush-PaperCompanion-$VERSION.jar" plugin.yml | grep -F "version: $VERSION"
+          printf '%s\n' "commit=0e9596123ce75af86664507e15a99e82e2a96b8e" "version=$VERSION" > dist/BUILD.txt
+          (cd dist && sha256sum *.jar > SHA256SUMS.txt)
+      - name: Upload reviewed jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: EnthusiaToiletFlush-final-0e95961
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
