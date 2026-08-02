@@ -4,7 +4,7 @@
 - REQ-001: When an operator runs `/schedrestart <minutes> [server]`, the system shall arm a restart for the named server (or the operator's current server if omitted) and begin a countdown of the requested minutes.
 - REQ-002: When a configured cron schedule fires, the system shall arm a restart for the schedule's target server and begin a countdown of the schedule's `warn-minutes` value.
 - REQ-003: While a restart is armed, the system shall broadcast a configured countdown message to players currently on the target server at every configured mark-second value.
-- REQ-004: While a restart is armed, the system shall play a configured Adventure sound to players currently on the target server at every mark-second value.
+- REQ-004: While a restart is armed, the system shall play a configured Adventure sound to players currently on the target server at every configured mark-second value.
 - REQ-005: If an operator runs `/schedrestart cancel [server]` while a restart is armed, then the system shall transition the coordinator for that server back to idle and broadcast a cancellation message.
 - REQ-006: Where the configured sound volume exceeds 0.8, the system shall log a startup warning identifying the offending key.
 
@@ -19,6 +19,7 @@
 - REQ-020: When the target server reports zero players (or the force-drain timeout fires), the system shall send a `RestartNow` plugin message on channel `qrestart:v1` to the target server.
 - REQ-021: When the companion receives a `RestartNow` message, the companion shall execute the operator-configured restart action (`SHUTDOWN`, `COMMAND`, or `EXIT_CODE`).
 - REQ-022: While a restart is armed for a target backend, the system shall publish the pending arm (delay seconds, mode, argument) into a backend-addressable SLP poll-back response so a companion with no online players can still discover and execute the restart. When the companion polls the proxy and the response carries a pending-arm sample entry with the `QR_ARM` marker, the companion shall execute the restart action with the supplied delay.
+- REQ-023: When an operator explicitly targets the reserved server name `proxy`, the system shall run a proxy-wide countdown, include it in `/schedrestart status`, allow `/schedrestart cancel proxy` while armed or counting down, and at T-0 cleanly shut down Velocity with a reconnect reason. This path shall not require a registered backend or Paper companion and shall rely on the external process supervisor to relaunch the proxy JVM.
 
 ## Rejoin queue
 - REQ-030: When a restart is armed, the system shall snapshot the current player list of the target server as the rejoin cohort.
