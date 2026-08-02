@@ -189,6 +189,31 @@ class NetworkRestartServiceTest {
         assertThat(control.disconnects).isZero()
         assertThat(control.maintenanceEnables).isZero()
         assertThat(executor.calls).isZero()
+        assertThat(service.lastCompletedProxyRestart()).isNull()
+        assertThat(service.lastCompletedServerRestart(smp)).isNull()
+    }
+
+    @Test
+    fun `executor snapshot stays stable when configuration changes during preflight`() {
+        val control = FakeControl()
+        val executor = ReloadDuringPreflightExecutor()
+        val service = service(control, executor)
+        val now = Instant.now()
+        val plan = service.createManual(
+            PlanType.PROXY,
+            emptySet(),
+            now.plusSeconds(1),
+            now,
+            "reload race",
+            "console",
+            false,
+        )
+
+        service.tick(now.plusSeconds(2))
+
+        assertThat(plan.state).isEqualTo(PlanState.COMPLETED)
+        assertThat(executor.realRestartCalls).isEqualTo(1)
+        assertThat(executor.dryRunRestartCalls).isZero()
     }
 
     @Test
@@ -304,6 +329,42 @@ class NetworkRestartServiceTest {
             calls++
             return CompletableFuture.completedFuture(PowerActionResult(true, "unexpected"))
         }
+    }
+
+    private class ReloadDuringPreflightExecutor : ExternalRestartExecutor {
+        var realRestartCalls = 0
+        var dryRunRestartCalls = 0
+
+        private val dryRun = object : ExternalRestartExecutor {
+            override val name = "DRY_RUN"
+            override val performsPowerActions = false
+            override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
+                CompletableFuture.completedFuture(PowerActionResult(true, "dry-run"))
+            override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+                dryRunRestartCalls++
+                return CompletableFuture.completedFuture(PowerActionResult(true, "dry-run"))
+            }
+        }
+
+        private val real = object : ExternalRestartExecutor {
+            override val name = "PTERODACTYL"
+            override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> {
+                current = dryRun
+                return CompletableFuture.completedFuture(PowerActionResult(true, "ok"))
+            }
+            override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+                realRestartCalls++
+                return CompletableFuture.completedFuture(PowerActionResult(true, "ok"))
+            }
+        }
+
+        @Volatile private var current: ExternalRestartExecutor = real
+        override val name: String get() = current.name
+        override val performsPowerActions: Boolean get() = current.performsPowerActions
+        override fun snapshot(): ExternalRestartExecutor = current
+        override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> = current.preflight(panelServerId)
+        override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> =
+            current.restart(actionKey, panelServerId)
     }
 
     private class SelectiveExecutor(private val rejectedPanelId: String) : ExternalRestartExecutor {

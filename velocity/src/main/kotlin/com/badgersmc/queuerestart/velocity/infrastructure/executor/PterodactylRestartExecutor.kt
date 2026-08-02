@@ -94,6 +94,7 @@ class ConfiguredRestartExecutor(
 
     override val name: String get() = delegate().name
     override val performsPowerActions: Boolean get() = delegate().performsPowerActions
+    override fun snapshot(): ExternalRestartExecutor = delegate()
 
     override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
         delegate().preflight(panelServerId)

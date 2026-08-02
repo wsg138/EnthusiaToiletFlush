@@ -54,8 +54,9 @@ presented as a substitute for an externally managed proxy restart.
    network sequence only after the proxy and backend identifiers are verified.
 
 `DRY_RUN` is intentionally non-disruptive. It validates scheduling and
-countdown behavior, records a completed dry-run plan, and performs no player or
-server lifecycle actions.
+countdown behavior, records a clearly marked dry-run result, and performs no
+player or server lifecycle actions. Dry-run records are excluded from
+`/lastrestart` history.
 
 ## Recurring schedules and migration
 
@@ -80,12 +81,14 @@ Future plans resume after a proxy restart. Overdue plans are marked missed.
 Plans interrupted during preflight, transfer, or dispatch are marked
 `NEEDS_REVIEW` and are never replayed automatically, preventing restart loops.
 
-If preflight fails, no power actions are sent. If a non-hub backend restart is
-rejected after preflight, the sequence stops before hubs are disconnected or
-Velocity is restarted. Any earlier accepted action is recorded and is never
-retried automatically. After an accepted proxy restart request, the old proxy
-keeps its login maintenance gate until it exits; if it does not exit, the gate
-expires after `maintenance-failure-expiry-seconds`.
+If preflight fails, no power actions are sent. Executor and target mappings are
+snapshotted when execution begins, so `/qrestart reload` cannot switch an
+in-flight plan between DRY_RUN and PTERODACTYL or redirect later actions. If a
+non-hub backend restart is rejected after preflight, the sequence stops before
+hubs are disconnected or Velocity is restarted. Any earlier accepted action is
+recorded and is never retried automatically. After an accepted proxy restart
+request, the old proxy keeps its login maintenance gate until it exits; if it
+does not exit, the gate expires after `maintenance-failure-expiry-seconds`.
 
 Check the proxy log for the plan identifier and Pterodactyl HTTP status. API
 keys are not written to logs or restart-state files.
