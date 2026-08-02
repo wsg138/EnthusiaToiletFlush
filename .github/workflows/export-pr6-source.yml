@@ -1,0 +1,26 @@
+name: export pr6 source
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: github.head_ref == 'agent/export-pr6-source'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Package source
+        run: |
+          zip -qr EnthusiaToiletFlush-pr6-source.zip . \
+            -x '.git/*' '*/build/*' '.gradle/*' 'EnthusiaToiletFlush-pr6-source.zip'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: EnthusiaToiletFlush-pr6-source
+          path: EnthusiaToiletFlush-pr6-source.zip
+          retention-days: 1
