@@ -59,7 +59,7 @@ sounds:
 network-restart:
   enabled: false
   timezone: America/Indiana/Indianapolis
-  executor: DRY_RUN # DRY_RUN or PTERODACTYL
+  executor: DRY_RUN # DRY_RUN is non-disruptive; PTERODACTYL performs real restarts
   panel-url: https://panel.example.com
   api-key: ${PTERODACTYL_API_KEY}
   proxy-server-id: velocity_identifier

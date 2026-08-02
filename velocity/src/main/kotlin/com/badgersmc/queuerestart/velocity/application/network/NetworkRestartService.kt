@@ -227,6 +227,10 @@ class NetworkRestartService(
             PlanType.NETWORK -> cfg.members.map { cfg.serverIds.getValue(it) } + cfg.proxyServerId
             PlanType.SERVER -> emptyList()
         }
+        if (!executor.performsPowerActions) {
+            completeDryRun(plan)
+            return
+        }
         CompletableFuture.allOf(*ids.map { id ->
             executor.preflight(id).toCompletableFuture().thenAccept { result ->
                 if (!result.accepted) throw IllegalStateException(result.detail)
@@ -288,10 +292,19 @@ class NetworkRestartService(
         val groups = targets.chunked(cfg.maxConcurrentActions)
         var stage: CompletionStage<Void> = CompletableFuture.completedFuture(null)
         for (group in groups) stage = stage.thenCompose {
-            CompletableFuture.allOf(*group.map { target ->
+            val requests = group.associateWith { target ->
                 dispatch(plan, "${plan.id}:${target.value}", cfg.serverIds.getValue(target)).toCompletableFuture()
-                    .thenAccept { result -> plan.targetResults[target.value] = if (result.accepted) result.detail else "FAILED: ${result.detail}" }
-            }.toTypedArray()).thenRun(::save)
+            }
+            CompletableFuture.allOf(*requests.values.toTypedArray()).thenRun {
+                val rejected = mutableListOf<String>()
+                requests.forEach { (target, future) ->
+                    val result = future.join()
+                    plan.targetResults[target.value] = if (result.accepted) result.detail else "FAILED: ${result.detail}"
+                    if (!result.accepted) rejected += "${target.value}: ${result.detail}"
+                }
+                save()
+                check(rejected.isEmpty()) { "restart rejected for ${rejected.joinToString()}" }
+            }
         }
         return stage
     }
@@ -315,11 +328,31 @@ class NetworkRestartService(
         return executor.restart(actionKey, panelServerId)
     }
 
+    private fun completeDryRun(plan: RestartPlan) {
+        val cfg = config()
+        when (plan.type) {
+            PlanType.PROXY -> plan.targetResults["proxy"] = "dry-run: no power action sent"
+            PlanType.NETWORK -> {
+                cfg.members.forEach { plan.targetResults[it.value] = "dry-run: no power action sent" }
+                plan.targetResults["proxy"] = "dry-run: no power action sent"
+            }
+            PlanType.SERVER -> Unit
+        }
+        plan.completedAt = Instant.now()
+        plan.state = PlanState.COMPLETED
+        plan.maintenanceEnabled = false
+        audit(plan, "completed via ${executor.name} without player disruption")
+        save()
+    }
+
     private fun complete(plan: RestartPlan, target: String, detail: String) {
         plan.targetResults[target] = detail
         plan.completedAt = Instant.now()
         plan.state = PlanState.COMPLETED
-        control.setMaintenance(false, Duration.ZERO)
+        // Keep the login gate active until this process actually exits. The
+        // replacement proxy starts with a fresh control adapter, and if the
+        // accepted panel action does not stop this process the gate expires
+        // naturally after maintenance-failure-expiry-seconds.
         plan.maintenanceEnabled = false
         audit(plan, "completed via ${executor.name}")
         save()

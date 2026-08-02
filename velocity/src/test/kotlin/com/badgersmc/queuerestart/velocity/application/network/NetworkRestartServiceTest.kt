@@ -74,7 +74,8 @@ class NetworkRestartServiceTest {
         service.tick(now.plusSeconds(2))
 
         assertThat(events).containsSubsequence("disconnect", "restart:proxy")
-        assertThat(control.maintenanceDisables).isGreaterThanOrEqualTo(2)
+        assertThat(control.maintenanceEnables).isEqualTo(1)
+        assertThat(control.maintenanceDisables).isEqualTo(1)
     }
 
     @Test
@@ -166,6 +167,55 @@ class NetworkRestartServiceTest {
     }
 
     @Test
+    fun `dry run completes without transfers disconnects maintenance or power requests`() {
+        val control = FakeControl()
+        val executor = NonDestructiveExecutor()
+        val service = service(control, executor)
+        val now = Instant.now()
+        val plan = service.createManual(
+            PlanType.NETWORK,
+            setOf(hub, smp),
+            now.plusSeconds(1),
+            now,
+            "validation",
+            "console",
+            false,
+        )
+
+        service.tick(now.plusSeconds(2))
+
+        assertThat(plan.state).isEqualTo(PlanState.COMPLETED)
+        assertThat(control.transfers).isZero()
+        assertThat(control.disconnects).isZero()
+        assertThat(control.maintenanceEnables).isZero()
+        assertThat(executor.calls).isZero()
+    }
+
+    @Test
+    fun `rejected backend restart aborts before hub disconnect and proxy restart`() {
+        val control = FakeControl()
+        val executor = SelectiveExecutor(rejectedPanelId = "smp1234")
+        val service = service(control, executor)
+        val now = Instant.now()
+        val plan = service.createManual(
+            PlanType.NETWORK,
+            setOf(hub, smp),
+            now.plusSeconds(1),
+            now,
+            "failure test",
+            "console",
+            false,
+        )
+
+        service.tick(now.plusSeconds(2))
+
+        assertThat(plan.state).isEqualTo(PlanState.FAILED)
+        assertThat(executor.restartIds).containsExactly("smp1234")
+        assertThat(control.disconnects).isZero()
+        assertThat(plan.failure).contains("SMP").contains("rejected")
+    }
+
+    @Test
     fun `last completed restart queries include proxy network and target history`() {
         val store = MemoryStore()
         val now = Instant.now()
@@ -242,6 +292,32 @@ class NetworkRestartServiceTest {
             CompletableFuture.completedFuture(PowerActionResult(false, "rejected"))
     }
 
+    private class NonDestructiveExecutor : ExternalRestartExecutor {
+        override val name = "DRY_RUN"
+        override val performsPowerActions = false
+        var calls = 0
+        override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> {
+            calls++
+            return CompletableFuture.completedFuture(PowerActionResult(true, "unexpected"))
+        }
+        override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+            calls++
+            return CompletableFuture.completedFuture(PowerActionResult(true, "unexpected"))
+        }
+    }
+
+    private class SelectiveExecutor(private val rejectedPanelId: String) : ExternalRestartExecutor {
+        override val name = "selective"
+        val restartIds = mutableListOf<String>()
+        override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
+            CompletableFuture.completedFuture(PowerActionResult(true, "ok"))
+        override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+            restartIds += panelServerId
+            val accepted = panelServerId != rejectedPanelId
+            return CompletableFuture.completedFuture(PowerActionResult(accepted, if (accepted) "ok" else "rejected"))
+        }
+    }
+
     private fun nextDailyWarningStart(): Instant {
         val zone = ZoneId.of("America/Indiana/Indianapolis")
         val now = Instant.now()
@@ -266,10 +342,14 @@ class NetworkRestartServiceTest {
         val broadcasts = mutableListOf<RestartNotice>()
         var maintenanceEnables = 0
         var maintenanceDisables = 0
+        var disconnects = 0
+        var transfers = 0
         override fun broadcast(notice: RestartNotice) { broadcasts += notice }
-        override fun disconnectAll(notice: RestartNotice) { events += "disconnect" }
-        override fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary> =
-            CompletableFuture.completedFuture(TransferSummary(0, 0, 0))
+        override fun disconnectAll(notice: RestartNotice) { disconnects++; events += "disconnect" }
+        override fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary> {
+            transfers++
+            return CompletableFuture.completedFuture(TransferSummary(0, 0, 0))
+        }
         override fun setMaintenance(enabled: Boolean, duration: Duration) {
             if (enabled) maintenanceEnables++
             else maintenanceDisables++

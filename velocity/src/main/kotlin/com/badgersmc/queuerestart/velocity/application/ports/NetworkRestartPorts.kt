@@ -9,6 +9,9 @@ data class PowerActionResult(val accepted: Boolean, val detail: String)
 
 interface ExternalRestartExecutor {
     val name: String
+
+    /** False for validation-only executors that must not move or disconnect players. */
+    val performsPowerActions: Boolean get() = true
     fun preflight(panelServerId: String): CompletionStage<PowerActionResult>
     fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult>
 }

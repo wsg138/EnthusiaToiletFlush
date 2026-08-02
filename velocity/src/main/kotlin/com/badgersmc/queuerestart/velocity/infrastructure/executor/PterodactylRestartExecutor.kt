@@ -74,6 +74,7 @@ class PterodactylRestartExecutor(
 
 class DryRunRestartExecutor : ExternalRestartExecutor {
     override val name: String = "DRY_RUN"
+    override val performsPowerActions: Boolean = false
     override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
         CompletableFuture.completedFuture(PowerActionResult(true, "dry-run preflight"))
     override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> =
@@ -92,6 +93,7 @@ class ConfiguredRestartExecutor(
     private var current: ExternalRestartExecutor = create(currentConfig)
 
     override val name: String get() = delegate().name
+    override val performsPowerActions: Boolean get() = delegate().performsPowerActions
 
     override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
         delegate().preflight(panelServerId)
