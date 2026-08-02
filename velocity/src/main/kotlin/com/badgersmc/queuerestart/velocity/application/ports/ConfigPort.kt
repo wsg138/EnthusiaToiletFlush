@@ -23,7 +23,11 @@ data class QueueRestartConfig(
     val sounds: Map<String, SoundCue>,
     val rankLadder: Map<String, Int>,
     val rankDefault: Int,
-    val proxyRestart: ProxyRestartScheduleConfig,
+    val proxyRestart: ProxyRestartScheduleConfig = ProxyRestartScheduleConfig(
+        restartTimes = emptyList(),
+        zone = ZoneId.systemDefault(),
+        warnMinutes = 20,
+    ),
 )
 
 data class DrainConfig(
