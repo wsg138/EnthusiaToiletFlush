@@ -54,6 +54,14 @@ jobs:
           if old not in text:
               raise SystemExit("expected test dependency block not found")
           build.write_text(text.replace(old, new, 1))
+
+          test = Path("velocity/src/test/kotlin/com/badgersmc/queuerestart/velocity/infrastructure/config/ConfigurateConfigAdapterTest.kt")
+          text = test.read_text()
+          old = 'Regex("(?ms)^access-messages:\\n(?:  .+\\n){4}")'
+          new = 'Regex("(?m)^access-messages:\\n(?:  .+\\n){4}")'
+          if old not in text:
+              raise SystemExit("expected access-messages fixture regex not found")
+          test.write_text(text.replace(old, new, 1))
           PY
 
       - name: Validate modified tree
