@@ -13,7 +13,7 @@ sealed interface SchedCommandResult {
 }
 
 /**
- * REQ-001, REQ-005, REQ-052, REQ-060, REQ-061, REQ-062.
+ * REQ-001, REQ-005, REQ-023, REQ-052, REQ-060, REQ-061, REQ-062.
  *
  * Pure command logic. The infrastructure-side Brigadier shim parses `/schedrestart`
  * argument trees and forwards to one of [arm] / [cancel] / [status]; the
@@ -24,12 +24,26 @@ class SchedRestartCommandHandler(
     private val hubServer: ServerId,
     private val companionPresent: (ServerId) -> Boolean,
     private val cohortFor: (ServerId) -> Cohort,
+    private val proxyRestart: ProxyRestartController? = null,
 ) {
 
     fun arm(target: ServerId, durationMinutes: Int): SchedCommandResult {
         if (durationMinutes <= 0) {
             return SchedCommandResult.Rejected("duration must be > 0 minutes")
         }
+
+        val durationSeconds = durationMinutes * 60
+        if (target == ProxyRestartService.TARGET) {
+            val controller = proxyRestart
+                ?: return SchedCommandResult.Rejected("proxy restart support is unavailable")
+            if (!controller.arm(durationSeconds)) {
+                return SchedCommandResult.Rejected(
+                    "restart already armed for '${target.value}' (state=${controller.state})",
+                )
+            }
+            return SchedCommandResult.Armed(target, durationSeconds)
+        }
+
         if (target == hubServer) {
             return SchedCommandResult.Rejected("cannot restart the hub server '${target.value}'")
         }
@@ -44,11 +58,23 @@ class SchedRestartCommandHandler(
                 "restart already armed for '${target.value}' (state=${coord.state})",
             )
         }
-        coord.arm(cohortFor(target), durationSeconds = durationMinutes * 60)
+        coord.arm(cohortFor(target), durationSeconds = durationSeconds)
         return SchedCommandResult.Armed(target, coord.durationSeconds)
     }
 
     fun cancel(target: ServerId): SchedCommandResult {
+        if (target == ProxyRestartService.TARGET) {
+            val controller = proxyRestart
+                ?: return SchedCommandResult.Rejected("proxy restart support is unavailable")
+            return if (controller.cancel()) {
+                SchedCommandResult.Cancelled(target)
+            } else {
+                SchedCommandResult.Rejected(
+                    "cannot cancel '${target.value}': not in cancellable state",
+                )
+            }
+        }
+
         val coord = registry.get(target)
         return try {
             coord.cancel()
@@ -60,6 +86,13 @@ class SchedRestartCommandHandler(
         }
     }
 
-    fun status(): SchedCommandResult =
-        SchedCommandResult.Status(registry.all().mapValues { it.value.state })
+    fun status(): SchedCommandResult {
+        val states = registry.all().mapValuesTo(linkedMapOf()) { it.value.state }
+        proxyRestart?.let { controller ->
+            if (controller.state != RestartState.IDLE) {
+                states[ProxyRestartService.TARGET] = controller.state
+            }
+        }
+        return SchedCommandResult.Status(states)
+    }
 }
