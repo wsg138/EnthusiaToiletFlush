@@ -2,6 +2,8 @@ package com.badgersmc.queuerestart.velocity.application.ports
 
 import com.badgersmc.queuerestart.velocity.application.drain.DrainOrder
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
+import java.time.LocalTime
+import java.time.ZoneId
 
 /**
  * Outbound port — typed access to `config.yml` after parsing. Adapter:
@@ -21,6 +23,7 @@ data class QueueRestartConfig(
     val sounds: Map<String, SoundCue>,
     val rankLadder: Map<String, Int>,
     val rankDefault: Int,
+    val proxyRestart: ProxyRestartScheduleConfig,
 )
 
 data class DrainConfig(
@@ -46,6 +49,16 @@ data class CountdownConfig(
     val messageT0: String,
     val cancelMessage: String,
 )
+
+data class ProxyRestartScheduleConfig(
+    val restartTimes: List<LocalTime>,
+    val zone: ZoneId,
+    val warnMinutes: Int,
+) {
+    init {
+        require(warnMinutes > 0) { "proxy restart warnMinutes must be > 0" }
+    }
+}
 
 data class SoundCue(val key: String, val volume: Float, val pitch: Float) {
     init {
