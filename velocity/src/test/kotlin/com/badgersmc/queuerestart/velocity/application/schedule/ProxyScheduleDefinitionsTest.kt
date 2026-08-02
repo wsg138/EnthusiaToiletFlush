@@ -11,21 +11,19 @@ class ProxyScheduleDefinitionsTest {
     @Test
     fun `schedule fires warn minutes before configured shutdown time`() {
         val zone = ZoneId.of("America/New_York")
-        val defs = proxyScheduleDefinitions(
+        val def = proxyScheduleDefinitions(
             ProxyRestartScheduleConfig(
                 restartTimes = listOf(LocalTime.of(4, 0)),
                 zone = zone,
                 warnMinutes = 20,
             ),
-        )
+        ).single()
 
-        assertThat(defs).singleElement().satisfies { def ->
-            assertThat(def.name).isEqualTo("proxy-04:00")
-            assertThat(def.target).isEqualTo(ProxyRestartService.TARGET)
-            assertThat(def.cronExpression).isEqualTo("40 3 * * *")
-            assertThat(def.warnMinutes).isEqualTo(20)
-            assertThat(def.zone).isEqualTo(zone)
-        }
+        assertThat(def.name).isEqualTo("proxy-04:00")
+        assertThat(def.target).isEqualTo(ProxyRestartService.TARGET)
+        assertThat(def.cronExpression).isEqualTo("40 3 * * *")
+        assertThat(def.warnMinutes).isEqualTo(20)
+        assertThat(def.zone).isEqualTo(zone)
     }
 
     @Test
