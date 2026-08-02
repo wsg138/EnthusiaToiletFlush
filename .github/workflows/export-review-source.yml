@@ -1,0 +1,24 @@
+name: export review source
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: github.head_ref == 'agent/fix-drain-timing-and-denials'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Package source
+        run: |
+          zip -qr EnthusiaToiletFlush-source.zip . \
+            -x '.git/*' '*/build/*' '.gradle/*' 'EnthusiaToiletFlush-source.zip'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: EnthusiaToiletFlush-review-source
+          path: EnthusiaToiletFlush-source.zip
+          retention-days: 1
