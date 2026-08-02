@@ -24,15 +24,14 @@ jobs:
           java-version: 21
           cache: gradle
 
-      - name: Extract and apply reviewed patch
+      - name: Apply reviewed patch
         run: |
-          awk '
-            /python3 - <<'"'"'PY'"'"'/ { capture=1; next }
-            capture && /^          PY$/ { capture=0; exit }
-            capture { sub(/^          /, ""); print }
-          ' .github/workflows/apply-network-hardening.yml > /tmp/apply-network-hardening.py
-          python3 /tmp/apply-network-hardening.py
-          rm -f .github/workflows/kick-network-hardening.yml .network-hardening-trigger
+          python3 .github/apply_network_hardening.py
+          rm -f \
+            .github/apply_network_hardening.py \
+            .github/workflows/apply-network-hardening.yml \
+            .github/workflows/kick-network-hardening.yml \
+            .network-hardening-trigger
 
       - name: Validate modified tree
         run: |
