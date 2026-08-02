@@ -11,6 +11,7 @@ import com.badgersmc.queuerestart.velocity.application.ports.AudiencePort
 import com.badgersmc.queuerestart.velocity.application.ports.ConfigPort
 import com.badgersmc.queuerestart.velocity.application.ports.MessagingPort
 import com.badgersmc.queuerestart.velocity.application.ports.ProxyPort
+import com.badgersmc.queuerestart.velocity.application.ports.ProxyRestartScheduleConfig
 import com.badgersmc.queuerestart.velocity.application.ports.QueuePort
 import com.badgersmc.queuerestart.velocity.application.ports.QueueRestartConfig
 import com.badgersmc.queuerestart.velocity.application.ports.SchedulerPort
@@ -23,6 +24,7 @@ import com.badgersmc.queuerestart.velocity.application.schedule.ProxyRestartServ
 import com.badgersmc.queuerestart.velocity.application.schedule.QRestartAdminCommandHandler
 import com.badgersmc.queuerestart.velocity.application.schedule.RestartOrchestrator
 import com.badgersmc.queuerestart.velocity.application.schedule.SchedRestartCommandHandler
+import com.badgersmc.queuerestart.velocity.application.schedule.ScheduleDefinition
 import com.badgersmc.queuerestart.velocity.application.schedule.ScheduleDiscoveryPoller
 import com.badgersmc.queuerestart.velocity.application.schedule.ScheduleService
 import com.badgersmc.queuerestart.velocity.domain.cohort.Cohort
@@ -200,13 +202,16 @@ class QueueRestartPlugin @Inject constructor(
             scheduler = schedulerPort,
             onTrigger = { def -> schedRestartHandler.arm(def.target, def.warnMinutes) },
         )
-        // Schedules are discovered from each backend's SLP-embedded sample —
-        // companions are the source of truth for their own restart cadence.
-        // The cache subscriber re-translates BackendSchedule entries into
-        // ScheduleDefinitions and reloads scheduleService whenever a change
-        // is observed.
+        // Backend schedules are discovered from each companion's SLP sample.
+        // Proxy schedules are local because the Velocity process has no Paper
+        // companion to advertise them.
         val scheduleCache = BackendScheduleCache()
-        BackendScheduleSync(scheduleCache, scheduleService).start()
+        val backendScheduleSync = BackendScheduleSync(
+            cache = scheduleCache,
+            scheduleService = scheduleService,
+            additionalDefinitions = { proxyScheduleDefinitions(cfgSnapshot().proxyRestart) },
+        )
+        backendScheduleSync.start()
         val scheduleDiscoveryPoller = ScheduleDiscoveryPoller(proxyPort, scheduleCache)
 
         val adminHandler = QRestartAdminCommandHandler(
@@ -218,6 +223,9 @@ class QueueRestartPlugin @Inject constructor(
                 // rank-ladder additions in the freshly parsed config
                 // become resolvable via permissionsOf.
                 VelocityProxyServerBackend.withRankLadder(cfgSnapshot().rankLadder.keys)
+                // Proxy-owned restart times live in this config, unlike the
+                // backend schedules discovered independently through SLP.
+                backendScheduleSync.refresh()
             },
         )
 
@@ -241,10 +249,11 @@ class QueueRestartPlugin @Inject constructor(
         }).repeat(Duration.ofSeconds(1)).schedule()
 
         logger.info(
-            "queue-restart ready. hub={}, channel={}, proxy-target={} (schedules learned from backends via SLP)",
+            "queue-restart ready. hub={}, channel={}, proxy-target={}, proxy-schedules={} (backend schedules learned via SLP)",
             cfgSnapshot().hubServer.value,
             VelocityChannelTransport.CHANNEL,
             ProxyRestartService.TARGET.value,
+            cfgSnapshot().proxyRestart.restartTimes.size,
         )
     }
 
@@ -279,6 +288,19 @@ class QueueRestartPlugin @Inject constructor(
         val meta = mgr.metaBuilder(literal).plugin(this).build()
         mgr.register(meta, brigadier)
     }
+
+    /** Maps configured proxy restart times to countdown-start cron entries. */
+    private fun proxyScheduleDefinitions(cfg: ProxyRestartScheduleConfig): List<ScheduleDefinition> =
+        cfg.restartTimes.map { restartAt ->
+            val countdownAt = restartAt.minusMinutes(cfg.warnMinutes.toLong())
+            ScheduleDefinition(
+                name = "proxy-%02d:%02d".format(restartAt.hour, restartAt.minute),
+                target = ProxyRestartService.TARGET,
+                cronExpression = "${countdownAt.minute} ${countdownAt.hour} * * *",
+                warnMinutes = cfg.warnMinutes,
+                zone = cfg.zone,
+            )
+        }
 
     /** Maps `secondsRemaining` to the named [SoundCue] keyed in `config.yml`. */
     private fun resolveSound(cfg: QueueRestartConfig, secondsRemaining: Int): SoundCue? {
