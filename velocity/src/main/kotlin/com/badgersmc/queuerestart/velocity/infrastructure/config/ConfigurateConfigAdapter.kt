@@ -4,6 +4,7 @@ import com.badgersmc.queuerestart.velocity.application.drain.DrainOrder
 import com.badgersmc.queuerestart.velocity.application.ports.ConfigPort
 import com.badgersmc.queuerestart.velocity.application.ports.CountdownConfig
 import com.badgersmc.queuerestart.velocity.application.ports.DrainConfig
+import com.badgersmc.queuerestart.velocity.application.ports.ProxyRestartScheduleConfig
 import com.badgersmc.queuerestart.velocity.application.ports.QueueRestartConfig
 import com.badgersmc.queuerestart.velocity.application.ports.RejoinConfig
 import com.badgersmc.queuerestart.velocity.application.ports.SoundCue
@@ -11,6 +12,9 @@ import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import org.spongepowered.configurate.ConfigurationNode
 import org.spongepowered.configurate.yaml.YamlConfigurationLoader
 import java.nio.file.Path
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeParseException
 
 /**
  * REQ-006 + impl §8.
@@ -46,6 +50,7 @@ class ConfigurateConfigAdapter(
             sounds = parseSounds(root.node("sounds")),
             rankLadder = parseRankLadder(root.node("rank-ladder")),
             rankDefault = root.node("rank-ladder", "default").getInt(0),
+            proxyRestart = parseProxyRestart(root.node("proxy-restart")),
         )
     }
 
@@ -72,6 +77,28 @@ class ConfigurateConfigAdapter(
         messageT0 = node.node("message-t0").requireString(),
         cancelMessage = node.node("cancel-message").requireString(),
     )
+
+    private fun parseProxyRestart(node: ConfigurationNode): ProxyRestartScheduleConfig {
+        val times = node.node("restart-times").childrenList().map { child ->
+            val raw = child.requireString().trim()
+            try {
+                LocalTime.parse(raw)
+            } catch (e: DateTimeParseException) {
+                throw IllegalArgumentException(
+                    "invalid proxy restart-time '$raw' (expected HH:mm)",
+                    e,
+                )
+            }
+        }
+        val zoneRaw = node.node("time-zone").string ?: ZoneId.systemDefault().id
+        val zone = try {
+            ZoneId.of(zoneRaw)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("invalid proxy restart time-zone '$zoneRaw'", e)
+        }
+        val warnMinutes = node.node("warn-minutes").getInt(20)
+        return ProxyRestartScheduleConfig(times, zone, warnMinutes)
+    }
 
     private fun parseSounds(node: ConfigurationNode): Map<String, SoundCue> {
         val out = linkedMapOf<String, SoundCue>()
