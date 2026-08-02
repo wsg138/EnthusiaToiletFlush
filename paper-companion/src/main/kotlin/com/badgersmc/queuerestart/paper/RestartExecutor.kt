@@ -41,10 +41,9 @@ fun interface RestartScheduler {
  * REQ-021. Executes a `RestartNow` plugin message by dispatching the right
  * action against [ServerControl] after deferring by `delaySeconds`.
  *
- * The deferral closes the gap created by Velocity dropping plugin messages
- * to backends with no players — the proxy ships RestartNow at countdown
- * start (while at least one player is on target) and the companion's local
- * timer fires the actual shutdown later.
+ * Managed restarts normally arrive with `delaySeconds == 0` after Velocity
+ * reaches T-0 and finishes moving or disconnecting players. Non-zero delays
+ * remain supported for protocol compatibility and direct tests.
  *
  * [abort] cancels the pending shutdown, used when the proxy sends a
  * `RestartCancelMessage` (operator ran `/schedrestart cancel`). Without

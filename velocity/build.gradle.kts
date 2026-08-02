@@ -22,6 +22,7 @@ dependencies {
     implementation("org.spongepowered:configurate-yaml:4.1.2")
 
     testImplementation(project(":common"))
+    testImplementation("com.velocityctd:velocity-api:3.5.0-SNAPSHOT")
     testImplementation("com.lemonappdev:konsist:0.17.3")
 }
 

@@ -55,6 +55,7 @@ it.
 
 The canonical sample is
 [`velocity/src/main/resources/config.yml`](velocity/src/main/resources/config.yml).
+The `access-messages` section controls restart, whitelist, failed-transfer, and network-maintenance denial screens.
 See [`docs/network-restarts.md`](docs/network-restarts.md) for Pterodactyl
 setup, dry-run testing, migration, recovery, and troubleshooting.
 

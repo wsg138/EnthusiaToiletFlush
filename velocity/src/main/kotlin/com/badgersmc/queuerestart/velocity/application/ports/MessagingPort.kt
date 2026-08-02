@@ -15,10 +15,10 @@ interface MessagingPort {
     fun sendDrainRequest(target: ServerId)
 
     /**
-     * Send `RestartNow` (0x10) to the named backend. The companion will
-     * defer the actual shutdown by [delaySeconds] from receipt — sending
-     * early (while a player is still on the target) is required because
-     * Velocity drops plugin messages when no player is connected.
+     * Send `RestartNow` (0x10) to the named backend. For managed backend
+     * restarts this is sent with a zero delay only after the T-0 drain has
+     * completed. The independent SLP poll-back channel supplies the same
+     * immediate arm when no player remains to carry a plugin message.
      */
     fun sendRestartNow(target: ServerId, mode: RestartMode, argument: String, delaySeconds: Int)
 

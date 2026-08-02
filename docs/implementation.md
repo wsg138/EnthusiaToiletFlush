@@ -85,8 +85,8 @@ com.badgersmc.queuerestart.paper
 IDLE
   └─arm(reqMinutes,cohort)──► ARMED
                                 └─tick──► COUNTDOWN
-                                            └─T-drainLead──► DRAINING
-                                                              └─empty | timeout──► RESTART_SENT
+                                            └─T-0──► DRAINING
+                                                     └─empty | disconnect+timeout──► RESTART_SENT
                                                                                     └─ping fail──► SERVER_DOWN
                                                                                                     └─ping ok──► REJOIN_RELEASE
                                                                                                                   └─cohort empty──► IDLE

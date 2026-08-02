@@ -9,16 +9,16 @@
 - REQ-006: Where the configured sound volume exceeds 0.8, the system shall log a startup warning identifying the offending key.
 
 ## Drain
-- REQ-010: When the countdown reaches `drain-lead-seconds` before T-0, the system shall begin transferring players from the target server to the configured hub in batches of `batch-size`, spaced by `batch-interval-ticks`.
+- REQ-010: When the visible countdown reaches T-0, the system shall begin transferring players from the target server to the configured hub in batches of `batch-size`, spaced by `batch-interval-ticks`; it shall not move players before T-0.
 - REQ-011: While a drain is in progress, the system shall order outgoing players according to the configured `drain-order` setting using rank weights resolved from the rank ladder.
-- REQ-012: If `force-drain-timeout-seconds` elapses while the target server still reports non-zero players, then the system shall send the restart signal regardless of remaining players.
+- REQ-012: The system shall send the backend restart signal only after the target is empty; if `force-drain-timeout-seconds` elapses, it shall first issue configured disconnects to remaining players and then send the immediate restart as a safety fallback.
 - REQ-013: If the configured hub server is unreachable or unregistered, then the system shall iterate `fallback-hubs` in order and use the first reachable entry.
 - REQ-014: Where a player holds permission `queuerestart.bypass.drain`, the system shall not include that player in the drain cohort.
 
 ## Restart execution
-- REQ-020: When the target server reports zero players (or the force-drain timeout fires), the system shall send a `RestartNow` plugin message on channel `qrestart:v1` to the target server.
+- REQ-020: When the T-0 drain leaves the target empty (or after remaining players receive the force-timeout disconnect), the system shall publish an immediate `RestartNow` through both the plugin-message and SLP poll-back delivery paths.
 - REQ-021: When the companion receives a `RestartNow` message, the companion shall execute the operator-configured restart action (`SHUTDOWN`, `COMMAND`, or `EXIT_CODE`).
-- REQ-022: While a restart is armed for a target backend, the system shall publish the pending arm (delay seconds, mode, argument) into a backend-addressable SLP poll-back response so a companion with no online players can still discover and execute the restart. When the companion polls the proxy and the response carries a pending-arm sample entry with the `QR_ARM` marker, the companion shall execute the restart action with the supplied delay.
+- REQ-022: After the T-0 drain completes, the system shall publish an immediate pending arm into a backend-addressable SLP poll-back response so a companion with no online players can discover and execute the restart. When the companion polls the proxy and the response carries a `QR_ARM` sample entry, the companion shall execute the supplied action.
 
 ## Rejoin queue
 - REQ-030: When a restart is armed, the system shall snapshot the current player list of the target server as the rejoin cohort.
@@ -32,6 +32,10 @@
 - REQ-041: When a `CheckHacksResult` message reports `outcome=DETECTED` for a cohort member, the system shall remove that player from the rejoin queue and broadcast no further rejoin messages for them.
 - REQ-042: If `check-gate-timeout-seconds` elapses for a cohort member without a `CheckHacksResult` message, then the system shall release that player to the queue when `release-on-timeout` is true, otherwise drop them from the cohort.
 - REQ-043: Where a player holds permission `queuerestart.bypass.checkhacks`, the system shall release that player to the queue without waiting for any `CheckHacksResult`.
+
+## Access denial messages
+- REQ-024: While a backend is draining, restarting, or offline for a managed restart, the proxy shall deny new server-switch attempts with a configurable message.
+- REQ-025: When Paper rejects a backend connection because the backend is whitelisted, the proxy shall preserve the player's existing proxy session where possible and show a configurable whitelist message.
 
 ## Configuration & ops
 - REQ-050: When `/qrestart reload` is invoked by an operator, the system shall reload `config.yml` and reschedule cron entries without aborting any in-flight countdown.

@@ -26,6 +26,7 @@ enum class RestartState {
  */
 class RestartCoordinator(val serverId: ServerId) {
 
+    @Volatile
     var state: RestartState = RestartState.IDLE
         private set
 

@@ -1,6 +1,7 @@
 package com.badgersmc.queuerestart.velocity.infrastructure.config
 
 import com.badgersmc.queuerestart.velocity.application.drain.DrainOrder
+import com.badgersmc.queuerestart.velocity.application.ports.AccessMessagesConfig
 import com.badgersmc.queuerestart.velocity.application.ports.ConfigPort
 import com.badgersmc.queuerestart.velocity.application.ports.ConfiguredRestartSchedule
 import com.badgersmc.queuerestart.velocity.application.ports.CountdownConfig
@@ -46,6 +47,7 @@ class ConfigurateConfigAdapter(
             drain = parseDrain(root.node("drain")),
             rejoin = parseRejoin(root.node("rejoin")),
             countdown = parseCountdown(root.node("countdown")),
+            accessMessages = parseAccessMessages(root.node("access-messages")),
             sounds = parseSounds(root.node("sounds")),
             rankLadder = parseRankLadder(root.node("rank-ladder")),
             rankDefault = root.node("rank-ladder", "default").getInt(0),
@@ -168,13 +170,22 @@ class ConfigurateConfigAdapter(
         return amount * when (match.groupValues[2]) { "h" -> 3600; "m" -> 60; else -> 1 }
     }
 
-    private fun parseDrain(node: ConfigurationNode) = DrainConfig(
-        batchSize = node.node("batch-size").requireInt(),
-        batchIntervalTicks = node.node("batch-interval-ticks").requireInt(),
-        drainLeadSeconds = node.node("drain-lead-seconds").requireInt(),
-        forceDrainTimeoutSeconds = node.node("force-drain-timeout-seconds").requireInt(),
-        drainOrder = parseDrainOrder(node.node("drain-order").requireString()),
-    )
+    private fun parseDrain(node: ConfigurationNode): DrainConfig {
+        val legacyLead = node.node("drain-lead-seconds").getInt(0)
+        if (legacyLead != 0) {
+            warner(
+                "drain.drain-lead-seconds=$legacyLead is deprecated and ignored; " +
+                    "player draining now begins at T-0",
+            )
+        }
+        return DrainConfig(
+            batchSize = node.node("batch-size").requireInt(),
+            batchIntervalTicks = node.node("batch-interval-ticks").requireInt(),
+            drainLeadSeconds = legacyLead,
+            forceDrainTimeoutSeconds = node.node("force-drain-timeout-seconds").requireInt(),
+            drainOrder = parseDrainOrder(node.node("drain-order").requireString()),
+        )
+    }
 
     private fun parseRejoin(node: ConfigurationNode) = RejoinConfig(
         enabled = node.node("enabled").getBoolean(true),
@@ -191,6 +202,18 @@ class ConfigurateConfigAdapter(
         messageT0 = node.node("message-t0").requireString(),
         cancelMessage = node.node("cancel-message").requireString(),
     )
+
+
+    private fun parseAccessMessages(node: ConfigurationNode): AccessMessagesConfig {
+        val defaults = AccessMessagesConfig.defaults()
+        if (node.virtual()) return defaults
+        return AccessMessagesConfig(
+            backendRestarting = node.node("backend-restarting").getString(defaults.backendRestarting),
+            backendWhitelisted = node.node("backend-whitelisted").getString(defaults.backendWhitelisted),
+            drainDisconnect = node.node("drain-disconnect").getString(defaults.drainDisconnect),
+            networkMaintenance = node.node("network-maintenance").getString(defaults.networkMaintenance),
+        )
+    }
 
     private fun parseSounds(node: ConfigurationNode): Map<String, SoundCue> {
         val out = linkedMapOf<String, SoundCue>()

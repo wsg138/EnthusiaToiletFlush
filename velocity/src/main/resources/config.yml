@@ -6,7 +6,8 @@ fallback-hubs: [lobby2, lobby3]
 drain:
   batch-size: 10
   batch-interval-ticks: 40
-  drain-lead-seconds: 30
+  # Legacy compatibility field. Backend draining now always begins at T-0.
+  drain-lead-seconds: 0
   force-drain-timeout-seconds: 120
   drain-order: priority-asc        # asc=low rank leaves first
 
@@ -45,6 +46,20 @@ countdown:
     <gold>[Server] <bold><green>RESTART CANCELLED</green></bold>
     <gold>[Server] <gray>The scheduled <yellow><server></yellow> restart has been cancelled.</gray>
     <dark_gray><strikethrough>--------------------------------------------------</strikethrough>
+
+access-messages:
+  backend-restarting: |-
+    <red><bold><server> is restarting</bold></red>
+    <gray>The restart begins after the transfer queue finishes. Please try again shortly.</gray>
+  backend-whitelisted: |-
+    <yellow><bold><server> is temporarily unavailable</bold></yellow>
+    <gray>The server is currently whitelisted. Please try again later.</gray>
+  drain-disconnect: |-
+    <red><bold><server> is restarting</bold></red>
+    <gray>We could not move you to a lobby, so you were safely disconnected.</gray>
+  network-maintenance: |-
+    <red><bold>Network restart in progress</bold></red>
+    <gray>Please reconnect shortly.</gray>
 
 sounds:
   10m:  { key: minecraft:block.note_block.hat, volume: 0.6, pitch: 1.2 }
