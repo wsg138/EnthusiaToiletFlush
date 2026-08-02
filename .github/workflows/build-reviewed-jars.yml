@@ -1,0 +1,38 @@
+name: build reviewed deployment jars
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.head_ref == 'agent/build-reviewed-jars'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: a4430ecb794437ca2ad425dd0414dab935fbfe6b
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - name: Test and build exact merged commit
+        run: |
+          chmod +x ./gradlew
+          ./gradlew check shadowJar --no-daemon -PreleaseVersion=0.1.2
+          mkdir -p dist
+          cp velocity/build/libs/velocity-0.1.2.jar dist/EnthusiaToiletFlush-Velocity-0.1.2.jar
+          cp paper-companion/build/libs/paper-companion-0.1.2.jar dist/EnthusiaToiletFlush-PaperCompanion-0.1.2.jar
+          sha256sum dist/*.jar | tee dist/SHA256SUMS.txt
+      - name: Upload reviewed jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: EnthusiaToiletFlush-reviewed-a4430ec
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
