@@ -57,6 +57,21 @@ Canonical sample lives at
 See `docs/implementation.md` §8 for the field reference. Sound volumes
 above 0.8 emit a startup warning; above 1.0 are rejected (REQ-006).
 
+Velocity can restart automatically at daily local times:
+
+```yaml
+proxy-restart:
+  restart-times: ["04:00"]
+  time-zone: "America/New_York"
+  warn-minutes: 20
+```
+
+`restart-times` are the intended shutdown times. The cron countdown begins
+`warn-minutes` before each entry so T-0 lands at the configured time. Leave
+the list empty to disable automatic proxy restarts. `/qrestart reload`
+rebuilds these proxy-owned schedules without aborting an active countdown or
+removing backend schedules learned through SLP.
+
 ## Commands
 
 | Command | Permission | Purpose |
@@ -64,14 +79,15 @@ above 0.8 emit a startup warning; above 1.0 are rejected (REQ-006).
 | `/schedrestart <minutes> [server]` | `queuerestart.command.schedrestart` | Arm an ad-hoc backend restart. Use the reserved target `proxy` to restart Velocity. |
 | `/schedrestart cancel [server]` | `queuerestart.command.schedrestart` | Cancel an armed backend or proxy countdown. |
 | `/schedrestart status` | `queuerestart.command.schedrestart` | Inspect coordinator states, including an active proxy countdown. |
-| `/qrestart reload` | `queuerestart.command.admin` | Reload config + cron. |
-| `/qrestart trigger <name>` | `queuerestart.command.admin` | Run named backend schedule on demand. |
+| `/qrestart reload` | `queuerestart.command.admin` | Reload config and rebuild proxy-owned cron entries. |
+| `/qrestart trigger <name>` | `queuerestart.command.admin` | Run a named backend or proxy schedule on demand. |
 
 Proxy example:
 
 ```text
 /schedrestart 5 proxy
 /schedrestart cancel proxy
+/qrestart trigger proxy-04:00
 ```
 
 A proxy restart disconnects all connected players at T-0 with a reconnect
@@ -94,7 +110,8 @@ Unit suite: `./gradlew test` — covers wire codec, rank ladder, countdown
 schedule, restart state machine, drain planner, rejoin service, check gate,
 schedule service, hub fallback, plugin-message adapter, queue adapter,
 configurate adapter, cron-utils scheduler, both command handlers, proxy
-restart lifecycle, restart executor, CheckHacks bridge.
+restart lifecycle and schedule translation, restart executor, CheckHacks
+bridge.
 
 End-to-end runbook: [`docs/e2e-runbook.md`](docs/e2e-runbook.md).
 
