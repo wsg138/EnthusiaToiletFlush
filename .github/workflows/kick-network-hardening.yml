@@ -27,11 +27,7 @@ jobs:
       - name: Apply reviewed patch
         run: |
           python3 .github/apply_network_hardening.py
-          rm -f \
-            .github/apply_network_hardening.py \
-            .github/workflows/apply-network-hardening.yml \
-            .github/workflows/kick-network-hardening.yml \
-            .network-hardening-trigger
+          rm -f .github/apply_network_hardening.py .network-hardening-trigger
 
       - name: Validate modified tree
         run: |
@@ -39,11 +35,17 @@ jobs:
           git diff --check
           ./gradlew check shadowJar --no-daemon
 
-      - name: Commit validated patch
+      - name: Commit validated source changes
         run: |
+          git checkout -- gradlew .github/workflows/release.yml
+          rm -f .github/workflows/ci.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          if git diff --cached --name-only | grep -q '^.github/workflows/'; then
+            echo "refusing to push workflow-file changes with GITHUB_TOKEN"
+            exit 1
+          fi
           git diff --cached --check
           git commit -m "Harden network restart failure handling [network-hardening-applied]"
           git push origin HEAD:agent/harden-network-restart
