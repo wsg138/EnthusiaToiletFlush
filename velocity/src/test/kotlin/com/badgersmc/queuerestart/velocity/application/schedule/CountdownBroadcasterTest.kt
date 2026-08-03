@@ -163,4 +163,57 @@ class CountdownBroadcasterTest {
         val times = audience.broadcasts.map { it.placeholders["time"] }
         assertThat(times).containsExactly("5 minutes", "2 minutes", "1 minute")
     }
+
+    @Test
+    fun `late first observation still fires initial configured mark`() {
+        val audience = RecordingAudience()
+        val b = broadcaster(audience)
+        b.register(target, schedule, hub, startingSeconds = 60)
+
+        b.tick(target, 59)
+
+        assertThat(audience.broadcasts.single().placeholders["time"]).isEqualTo("1 minute")
+    }
+
+    @Test
+    fun `crossing 10 second mark emits it once`() {
+        val audience = RecordingAudience()
+        val b = broadcaster(audience)
+        b.register(target, schedule, hub, startingSeconds = 11)
+
+        b.tick(target, 11)
+        b.tick(target, 9)
+        b.tick(target, 9)
+
+        assertThat(audience.broadcasts.map { it.placeholders["time"] }).containsExactly("10 seconds")
+        assertThat(audience.sounds).containsExactly(RecordingAudience.Sound(target, tick))
+    }
+
+    @Test
+    fun `large jump consumes stale marks and emits only newest due mark`() {
+        val audience = RecordingAudience()
+        val b = broadcaster(audience)
+        b.register(target, schedule, hub, startingSeconds = 61)
+
+        b.tick(target, 61)
+        b.tick(target, 9)
+        b.tick(target, 8)
+
+        assertThat(audience.broadcasts.map { it.placeholders["time"] }).containsExactly("10 seconds")
+    }
+
+    @Test
+    fun `T-0 fires exactly once after delayed ticks`() {
+        val audience = RecordingAudience()
+        val b = broadcaster(audience)
+        b.register(target, schedule, hub, startingSeconds = 2)
+
+        b.tick(target, 1)
+        b.tick(target, 0)
+        b.tick(target, 0)
+
+        assertThat(audience.broadcasts.count { it.message.contains("Sending you") }).isEqualTo(1)
+        assertThat(audience.sounds.count { it.cue == t0Sound }).isEqualTo(1)
+    }
+
 }

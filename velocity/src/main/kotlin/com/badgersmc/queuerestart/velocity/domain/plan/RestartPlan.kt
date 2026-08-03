@@ -19,6 +19,7 @@ enum class PlanState {
     MISSED,
     NEEDS_REVIEW,
 }
+
 data class RestartPlan(
     val id: UUID = UUID.randomUUID(),
     val type: PlanType,
@@ -37,6 +38,10 @@ data class RestartPlan(
     var actionStarted: Boolean = false,
     var maintenanceEnabled: Boolean = false,
     var dryRun: Boolean = false,
+    /** True only after the ephemeral backend coordinator accepted this plan. */
+    var backendArmAccepted: Boolean = false,
+    /** Previous observed countdown value used to detect crossed warning marks. */
+    var lastObservedRemainingSeconds: Long? = null,
     /** Wall-clock time at which this plan's restart action completed. */
     var completedAt: Instant? = null,
     var failure: String = "",

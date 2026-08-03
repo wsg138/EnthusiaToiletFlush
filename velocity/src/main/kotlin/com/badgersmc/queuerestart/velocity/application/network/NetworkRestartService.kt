@@ -7,6 +7,7 @@ import com.badgersmc.queuerestart.velocity.application.ports.NetworkRestartConfi
 import com.badgersmc.queuerestart.velocity.application.ports.PowerActionResult
 import com.badgersmc.queuerestart.velocity.application.ports.RestartNotice
 import com.badgersmc.queuerestart.velocity.application.ports.RestartPlanStore
+import com.badgersmc.queuerestart.velocity.application.ports.SoundCue
 import com.badgersmc.queuerestart.velocity.application.schedule.SchedCommandResult
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import com.badgersmc.queuerestart.velocity.domain.plan.PlanState
@@ -34,6 +35,8 @@ class NetworkRestartService(
     private val backendArm: (ServerId, Int, Boolean) -> SchedCommandResult,
     private val backendCancel: (ServerId) -> Unit,
     private val audit: (RestartPlan, String) -> Unit,
+    private val serverCancellationOwner: ((ServerId, Boolean) -> Unit)? = null,
+    private val soundResolver: (Long) -> SoundCue? = { null },
 ) {
     private val plans = ConcurrentHashMap<UUID, RestartPlan>()
 
@@ -139,12 +142,24 @@ class NetworkRestartService(
 
     private fun cancel(plan: RestartPlan, auditEvent: String = "cancelled") {
         plan.state = PlanState.CANCELLED
-        if (plan.type == PlanType.SERVER) plan.targets.firstOrNull()?.let(backendCancel)
-        if (!plan.silent) cancellation(plan)
+        if (plan.type == PlanType.SERVER) {
+            plan.targets.firstOrNull()?.let { target ->
+                val owner = serverCancellationOwner
+                if (owner != null) {
+                    owner(target, plan.silent)
+                } else {
+                    backendCancel(target)
+                    if (!plan.silent) cancellation(plan)
+                }
+            }
+        } else if (!plan.silent) {
+            cancellation(plan)
+        }
         audit(plan, auditEvent)
         save()
     }
 
+    @Synchronized
     fun tick(now: Instant) {
         createAutomaticPlans(now)
         plans.values.filter(RestartPlan::active).forEach { plan ->
@@ -159,49 +174,77 @@ class NetworkRestartService(
 
     private fun tickPlan(plan: RestartPlan, now: Instant) {
         if (now.isBefore(plan.warningAt)) return
+        val remaining = remainingSeconds(now, plan.executionAt)
         if (plan.state == PlanState.SCHEDULED) {
             if (plan.type == PlanType.SERVER) {
-                val seconds = Duration.between(now, plan.executionAt).seconds.coerceAtLeast(1).toInt()
-                when (val result = backendArm(plan.targets.single(), seconds, plan.silent)) {
-                    is SchedCommandResult.Rejected -> return fail(plan, result.reason)
-                    else -> {}
+                if (remaining == 0L) {
+                    return miss(plan, "server countdown elapsed before its backend handoff was restored")
                 }
-            } else if (!plan.silent) {
-                val remaining = Duration.between(now, plan.executionAt).seconds.coerceAtLeast(0)
-                plan.announcedSeconds += config().announcementPointsSeconds.filter { remaining <= it }
-                announcement(plan, remaining)
+                when (val result = backendArm(plan.targets.single(), remaining.toInt(), plan.silent)) {
+                    is SchedCommandResult.Armed -> plan.backendArmAccepted = true
+                    is SchedCommandResult.Rejected -> return fail(plan, result.reason)
+                    else -> return fail(plan, "backend arm did not return an armed result")
+                }
+            } else if (!plan.silent && remaining > 0L) {
+                announcement(plan, remaining, urgent = false)
+                countdownMarks(config()).takeIf { remaining in it }?.let { plan.announcedSeconds += remaining }
+                soundResolver(remaining)?.let(control::playSound)
             }
+            plan.lastObservedRemainingSeconds = remaining
             plan.state = PlanState.COUNTING_DOWN
             audit(plan, "countdown started")
             save()
         }
-        val remaining = Duration.between(now, plan.executionAt).seconds.coerceAtLeast(0)
-        if (plan.type != PlanType.SERVER && !plan.silent) announceDue(plan, remaining)
-        if (remaining == 0L && plan.type == PlanType.SERVER) {
-            plan.completedAt = now
-            plan.state = PlanState.COMPLETED
-            save()
-        } else if (remaining == 0L) {
+
+        val currentRemaining = remainingSeconds(now, plan.executionAt)
+        if (plan.type != PlanType.SERVER && !plan.silent && currentRemaining > 0L) announceDue(plan, currentRemaining)
+        if (currentRemaining == 0L && plan.type == PlanType.SERVER) {
+            if (!plan.backendArmAccepted) {
+                fail(plan, "server execution time arrived without an accepted backend handoff")
+            } else {
+                plan.completedAt = now
+                plan.state = PlanState.COMPLETED
+                save()
+            }
+        } else if (currentRemaining == 0L) {
             execute(plan)
         }
     }
 
     private fun announceDue(plan: RestartPlan, remaining: Long) {
-        val cfg = config()
-        if (remaining in 1..cfg.finalCountdownSeconds.toLong() && plan.announcedSeconds.add(remaining)) {
-            control.broadcast(notice(plan, remaining, urgent = true))
-            save()
+        val previous = plan.lastObservedRemainingSeconds
+        if (previous == null) {
+            plan.lastObservedRemainingSeconds = remaining
             return
         }
-        val due = cfg.announcementPointsSeconds.filter { remaining <= it && it !in plan.announcedSeconds }
-        if (due.isNotEmpty()) {
-            plan.announcedSeconds += due
-            announcement(plan, remaining)
-            save()
-        }
+        if (remaining >= previous) return
+
+        val crossed = countdownMarks(config())
+            .filter { it < previous && it >= remaining && it !in plan.announcedSeconds }
+        plan.lastObservedRemainingSeconds = remaining
+        if (crossed.isEmpty()) return
+
+        // Consume every crossed mark, but present only the newest one nearest
+        // the current time so a delayed scheduler tick cannot spam stale lines.
+        plan.announcedSeconds += crossed
+        val due = crossed.minOrNull() ?: return
+        val urgent = due <= config().finalCountdownSeconds
+        announcement(plan, due, urgent)
+        soundResolver(due)?.let(control::playSound)
+        save()
     }
 
-    private fun announcement(plan: RestartPlan, remaining: Long) = control.broadcast(notice(plan, remaining, false))
+    private fun announcement(plan: RestartPlan, remaining: Long, urgent: Boolean) =
+        control.broadcast(notice(plan, remaining, urgent))
+
+    private fun countdownMarks(cfg: NetworkRestartConfig): Set<Long> =
+        (cfg.announcementPointsSeconds + (1..cfg.finalCountdownSeconds).map(Int::toLong)).toSet()
+
+    private fun remainingSeconds(now: Instant, executionAt: Instant): Long {
+        val millis = Duration.between(now, executionAt).toMillis()
+        if (millis <= 0L) return 0L
+        return (millis + 999L) / 1000L
+    }
 
     private fun notice(plan: RestartPlan, remaining: Long, urgent: Boolean): RestartNotice {
         val time = RestartTimes.format(Duration.ofSeconds(remaining))
@@ -260,7 +303,10 @@ class NetworkRestartService(
         enableMaintenance(plan, cfg)
         plan.state = PlanState.DISPATCHING
         save()
-        if (!plan.silent) control.broadcast(RestartNotice("NETWORK", "RESTARTING NOW", "The Velocity proxy is restarting.", "All players are being disconnected.", plan.reason))
+        finalAnnouncement(
+            plan,
+            RestartNotice("NETWORK", "RESTARTING NOW", "The Velocity proxy is restarting.", "All players are being disconnected.", plan.reason),
+        )
         control.disconnectAll(RestartNotice("NETWORK", "Network restarting", "The Velocity proxy is restarting.", "Please reconnect shortly.", plan.reason, true))
         dispatch(plan, "${plan.id}:proxy", cfg.proxyServerId, executionExecutor).whenComplete { result, error ->
             if (error != null || !result.accepted) fail(plan, error?.let(::rootMessage) ?: result.detail)
@@ -288,7 +334,10 @@ class NetworkRestartService(
                 CompletableFuture.runAsync({}, CompletableFuture.delayedExecutor(cfg.backendHeadStartSeconds, TimeUnit.SECONDS))
             }
             .thenCompose {
-                if (!plan.silent) control.broadcast(RestartNotice("NETWORK", "RESTARTING NOW", "The entire network is restarting.", "All players are being disconnected.", plan.reason))
+                finalAnnouncement(
+                    plan,
+                    RestartNotice("NETWORK", "RESTARTING NOW", "The entire network is restarting.", "All players are being disconnected.", plan.reason),
+                )
                 control.disconnectAll(RestartNotice("NETWORK", "Full network restart", "The entire Minecraft network is restarting.", "Please reconnect shortly.", plan.reason, true))
                 restartBatch(plan, cfg.hubServers, cfg, executionExecutor)
             }
@@ -406,9 +455,23 @@ class NetworkRestartService(
         save()
     }
 
+    private fun finalAnnouncement(plan: RestartPlan, notice: RestartNotice) {
+        if (plan.silent || !plan.announcedSeconds.add(0L)) return
+        control.broadcast(notice)
+        soundResolver(0L)?.let(control::playSound)
+        save()
+    }
+
     private fun cancellation(plan: RestartPlan) = control.broadcast(
         RestartNotice(if (plan.type == PlanType.SERVER) "SERVER" else "NETWORK", "RESTART CANCELLED", "The scheduled ${plan.type.name.lowercase()} restart was cancelled.", "", ""),
     )
+
+    private fun miss(plan: RestartPlan, detail: String) {
+        plan.failure = detail
+        plan.state = PlanState.MISSED
+        audit(plan, "missed: $detail")
+        save()
+    }
 
     private fun createAutomaticPlans(now: Instant) {
         if (!config().enabled) return
@@ -464,6 +527,15 @@ class NetworkRestartService(
                 plan.failure = "execution was interrupted; destructive actions were not replayed"
             } else if (plan.active() && !plan.executionAt.isAfter(now)) {
                 plan.state = PlanState.MISSED
+                plan.failure = "execution time elapsed while the proxy was unavailable"
+            } else if (plan.type == PlanType.SERVER && plan.state == PlanState.COUNTING_DOWN) {
+                // The persisted plan survived, but its coordinator and
+                // broadcaster were ephemeral. Safely re-arm only this future
+                // server countdown; proxy/network destructive states retain
+                // their no-replay safeguards above.
+                plan.state = PlanState.SCHEDULED
+                plan.backendArmAccepted = false
+                plan.lastObservedRemainingSeconds = null
             }
             plans[plan.id] = plan
         }

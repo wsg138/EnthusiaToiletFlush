@@ -235,6 +235,9 @@ class RestartOrchestratorTest {
         orch.tick(t0.plusSeconds(60))
         assertThat(b.registry.get(survival).state).isEqualTo(RestartState.DRAINING)
         assertThat(proxy.transfers.map { it.first }).containsExactly(pid("alice"))
+
+        orch.tick(t0.plusSeconds(62))
+        assertThat(b.audience.disconnects.map { it.playerId }).containsExactly(pid("lurker"))
     }
 
     @Test
@@ -373,4 +376,30 @@ class RestartOrchestratorTest {
 
         assertThat(b.gate.isPending(pid("alice"))).isFalse()
     }
+
+    @Test
+    fun `persisted server cancellation before coordinator arm announces once`() {
+        val (orch, b) = setup()
+
+        orch.cancelPlan(survival, silent = false)
+        orch.cancelPlan(survival, silent = true)
+
+        assertThat(b.audience.broadcasts.count { it.contains("cancel") }).isEqualTo(1)
+        assertThat(b.messaging.cancelSent).containsExactly(survival, survival)
+    }
+
+    @Test
+    fun `direct cancellation remains idempotent and announces once`() {
+        val (orch, b) = setup()
+        b.registry.get(survival).arm(cohort("a"), durationSeconds = 60)
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        orch.tick(now)
+
+        orch.cancel(survival, now)
+        orch.cancel(survival, now)
+
+        assertThat(b.audience.broadcasts.count { it.contains("cancel") }).isEqualTo(1)
+        assertThat(b.messaging.cancelSent).containsExactly(survival)
+    }
+
 }

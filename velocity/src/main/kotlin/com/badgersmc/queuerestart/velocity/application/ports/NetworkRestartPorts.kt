@@ -22,6 +22,8 @@ interface ExternalRestartExecutor {
 
 interface NetworkControlPort {
     fun broadcast(notice: RestartNotice)
+    /** Play a countdown cue to every currently connected proxy player. */
+    fun playSound(cue: SoundCue) = Unit
     fun disconnectAll(notice: RestartNotice)
     fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary>
     fun setMaintenance(enabled: Boolean, duration: Duration)

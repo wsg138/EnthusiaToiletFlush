@@ -15,12 +15,10 @@ data class MarkSecond(val secondsRemaining: Int) {
 /**
  * REQ-003, REQ-004.
  *
- * Decides whether a given seconds-remaining value is a configured warn mark.
- * T-0 is always a mark — operators may omit it; it's added implicitly.
- *
- * Pure domain. The infrastructure layer is responsible for driving ticks
- * and dispatching the actual chat / sound side-effects when [fireAt]
- * returns non-null.
+ * T-0 is always a mark. [crossedMarks] makes countdown delivery resilient to
+ * scheduler delay by identifying every configured mark crossed between two
+ * observations; callers can consume all of them while presenting only the
+ * newest relevant mark.
  */
 class CountdownSchedule(rawMarks: Collection<Int>) {
 
@@ -36,7 +34,21 @@ class CountdownSchedule(rawMarks: Collection<Int>) {
         markSet = deduped.toSet()
     }
 
-    /** Returns a [MarkSecond] when [secondsRemaining] is a mark, else null. */
+    /** Returns a [MarkSecond] when [secondsRemaining] is an exact mark. */
     fun fireAt(secondsRemaining: Int): MarkSecond? =
         if (secondsRemaining >= 0 && secondsRemaining in markSet) MarkSecond(secondsRemaining) else null
+
+    /**
+     * Returns marks in `[currentRemaining, previousRemaining)` in descending
+     * order. An upward clock jump produces no marks and never re-opens an
+     * already consumed portion of the countdown.
+     */
+    fun crossedMarks(previousRemaining: Int, currentRemaining: Int): List<MarkSecond> {
+        require(previousRemaining >= 0) { "previousRemaining must be ≥ 0" }
+        require(currentRemaining >= 0) { "currentRemaining must be ≥ 0" }
+        if (currentRemaining > previousRemaining) return emptyList()
+        return configuredMarks.filter {
+            it.secondsRemaining < previousRemaining && it.secondsRemaining >= currentRemaining
+        }
+    }
 }

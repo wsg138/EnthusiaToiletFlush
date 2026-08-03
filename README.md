@@ -1,8 +1,9 @@
 # EnthusiaToiletFlush
 
-Velocity-CTD plugin + Paper companion for graceful scheduled backend, proxy,
-and full-network restarts on BadgersMC. Backend restarts drain players to a
-hub and rejoin them in rank-weighted order behind a CheckHacks gate.
+Velocity-CTD plugin + Paper companion for scheduled backend, proxy, and
+full-network restarts on BadgersMC. Backend restarts gracefully drain players
+to a hub and rejoin them in rank-weighted order behind a CheckHacks gate;
+proxy and full-network restarts fully disconnect connected players.
 
 (Internal codename: `queue-restart` — Gradle subproject names, package paths,
 plugin-message channel `qrestart:v1`, and SLP markers retain that identifier
@@ -107,7 +108,7 @@ in [`docs/checkhacks-fork-pr.md`](docs/checkhacks-fork-pr.md).
 ## Verification
 
 ```bash
-./gradlew check shadowJar --no-daemon
+./gradlew :velocity:check :velocity:shadowJar :paper-companion:check :paper-companion:shadowJar --no-daemon
 ```
 
 This runs unit tests, Pterodactyl executor tests, network restart failure-path

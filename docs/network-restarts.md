@@ -77,9 +77,15 @@ unchanged. Do not leave a duplicate Skript or another proxy scheduler active.
 ## Recovery and troubleshooting
 
 Plans are persisted in `network-restarts.state` using atomic replacement.
-Future plans resume after a proxy restart. Overdue plans are marked missed.
-Plans interrupted during preflight, transfer, or dispatch are marked
+Future plans resume after a proxy restart. A future server plan that was
+already counting down is safely re-armed with only its remaining time, so past
+warning marks are not replayed. Overdue plans are marked missed. Plans
+interrupted during preflight, transfer, or dispatch are marked
 `NEEDS_REVIEW` and are never replayed automatically, preventing restart loops.
+
+Countdown message templates and sound definitions are resolved at each mark,
+so a successful `/qrestart reload` affects active and future countdowns. A
+failed reload leaves the last-known-good configuration active.
 
 If preflight fails, no power actions are sent. Executor and target mappings are
 snapshotted when execution begins, so `/qrestart reload` cannot switch an

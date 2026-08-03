@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
         with:
           distribution: temurin
@@ -24,9 +26,9 @@ jobs:
       - name: Run tests, architecture checks, and package jars
         run: |
           chmod +x ./gradlew
-          ./gradlew check shadowJar --no-daemon
+          ./gradlew :velocity:check :velocity:shadowJar :paper-companion:check :paper-companion:shadowJar --no-daemon
       - name: Verify release version in packaged plugin metadata
         run: |
-          ./gradlew clean shadowJar --no-daemon -PreleaseVersion=9.8.7
+          ./gradlew clean :velocity:shadowJar :paper-companion:shadowJar --no-daemon -PreleaseVersion=9.8.7
           unzip -p velocity/build/libs/velocity-9.8.7.jar velocity-plugin.json | grep -F '"version": "9.8.7"'
           unzip -p paper-companion/build/libs/paper-companion-9.8.7.jar plugin.yml | grep -F 'version: 9.8.7'

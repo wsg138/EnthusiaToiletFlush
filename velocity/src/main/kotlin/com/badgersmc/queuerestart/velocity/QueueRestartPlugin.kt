@@ -13,10 +13,11 @@ import com.badgersmc.queuerestart.velocity.application.ports.MessagingPort
 import com.badgersmc.queuerestart.velocity.application.ports.ProxyPort
 import com.badgersmc.queuerestart.velocity.application.ports.QueuePort
 import com.badgersmc.queuerestart.velocity.application.ports.QueueRestartConfig
-import com.badgersmc.queuerestart.velocity.application.ports.SoundCue
 import com.badgersmc.queuerestart.velocity.application.schedule.BackendRestartOptions
 import com.badgersmc.queuerestart.velocity.application.schedule.CoordinatorRegistry
 import com.badgersmc.queuerestart.velocity.application.schedule.CountdownBroadcaster
+import com.badgersmc.queuerestart.velocity.application.schedule.CountdownPresentation
+import com.badgersmc.queuerestart.velocity.application.schedule.CountdownSoundPolicy
 import com.badgersmc.queuerestart.velocity.application.schedule.QRestartAdminCommandHandler
 import com.badgersmc.queuerestart.velocity.application.schedule.RestartOrchestrator
 import com.badgersmc.queuerestart.velocity.application.schedule.SchedRestartCommandHandler
@@ -128,9 +129,14 @@ class QueueRestartPlugin @Inject constructor(
         )
         val countdownBroadcaster = CountdownBroadcaster(
             audience = audience,
-            messageTemplate = cfgSnapshot().countdown.message,
-            t0Template = cfgSnapshot().countdown.messageT0,
-            soundResolver = ::resolveSound.partial(cfgSnapshot()),
+            presentationSupplier = {
+                val latest = cfgSnapshot()
+                CountdownPresentation(
+                    messageTemplate = latest.countdown.message,
+                    t0Template = latest.countdown.messageT0,
+                    soundResolver = { seconds -> CountdownSoundPolicy.resolve(latest.sounds, seconds.toLong()) },
+                )
+            },
             onMark = { target, secondsRemaining, isT0 ->
                 if (isT0) {
                     logger.info("queue-restart: {} T-0 reached — sending players to hub", target.value)
@@ -200,6 +206,8 @@ class QueueRestartPlugin @Inject constructor(
             backendArm = { target, seconds, silent -> schedRestartHandler.armSeconds(target, seconds, silent) },
             backendCancel = { target -> orchestrator.cancel(target) },
             audit = { plan, event -> logger.info("network restart plan {}: {}", plan.id, event) },
+            serverCancellationOwner = { target, silent -> orchestrator.cancelPlan(target, silent) },
+            soundResolver = { seconds -> CountdownSoundPolicy.resolve(cfgSnapshot().sounds, seconds) },
         )
         val adminHandler = QRestartAdminCommandHandler(
             config = config,
@@ -276,23 +284,4 @@ class QueueRestartPlugin @Inject constructor(
         proxy.commandManager.register(meta, command)
     }
 
-    /** Maps `secondsRemaining` to the named [SoundCue] keyed in `config.yml`. */
-    private fun resolveSound(cfg: QueueRestartConfig, secondsRemaining: Int): SoundCue? {
-        val key = when (secondsRemaining) {
-            0 -> "t0"
-            in 1..10 -> "tick"
-            30 -> "30s"
-            60 -> "1m"
-            120 -> "2m"
-            300 -> "5m"
-            600 -> "10m"
-            1200 -> "20m"
-            else -> return null
-        }
-        return cfg.sounds[key]
-    }
-
-    /** Bind the first arg of [resolveSound] for the broadcaster's expected `(Int) -> SoundCue?`. */
-    private fun ((QueueRestartConfig, Int) -> SoundCue?).partial(cfg: QueueRestartConfig): (Int) -> SoundCue? =
-        { s -> this(cfg, s) }
 }

@@ -28,10 +28,15 @@ class AtomicRestartPlanStore(private val path: Path, private val warning: (Strin
         }
     }
 
-    @Synchronized override fun save(plans: Collection<RestartPlan>) {
+    @Synchronized
+    override fun save(plans: Collection<RestartPlan>) {
         Files.createDirectories(path.parent)
         val temporary = path.resolveSibling("${path.fileName}.tmp")
-        Files.writeString(temporary, plans.joinToString("\n", postfix = if (plans.isEmpty()) "" else "\n", transform = ::encode), StandardCharsets.UTF_8)
+        Files.writeString(
+            temporary,
+            plans.joinToString("\n", postfix = if (plans.isEmpty()) "" else "\n", transform = ::encode),
+            StandardCharsets.UTF_8,
+        )
         try {
             Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } catch (_: AtomicMoveNotSupportedException) {
@@ -49,31 +54,52 @@ class AtomicRestartPlanStore(private val path: Path, private val warning: (Strin
         b64(plan.dispatchedActionKeys.joinToString(",")),
         plan.completedAt?.toString().orEmpty(),
         plan.dryRun,
+        plan.backendArmAccepted,
+        plan.lastObservedRemainingSeconds?.toString().orEmpty(),
     ).joinToString("|")
 
     private fun decode(line: String): RestartPlan {
         val p = line.split('|')
-        require(p.size in 16..19) { "invalid restart state record" }
+        require(p.size in 16..21) { "invalid restart state record" }
         return RestartPlan(
-            id = UUID.fromString(p[0]), type = PlanType.valueOf(p[1]),
+            id = UUID.fromString(p[0]),
+            type = PlanType.valueOf(p[1]),
             targets = text(p[13]).split(',').filter(String::isNotBlank).map(::ServerId).toSet(),
-            createdAt = Instant.parse(p[3]), executionAt = Instant.parse(p[4]), warningAt = Instant.parse(p[5]),
-            reason = text(p[7]), creator = text(p[6]), automaticKey = text(p[8]).ifBlank { null },
-            silent = p[9].toBoolean(), state = PlanState.valueOf(p[2]),
-            announcedSeconds = ConcurrentHashMap.newKeySet<Long>().also { it += text(p[14]).split(',').filter(String::isNotBlank).map(String::toLong) },
+            createdAt = Instant.parse(p[3]),
+            executionAt = Instant.parse(p[4]),
+            warningAt = Instant.parse(p[5]),
+            reason = text(p[7]),
+            creator = text(p[6]),
+            automaticKey = text(p[8]).ifBlank { null },
+            silent = p[9].toBoolean(),
+            state = PlanState.valueOf(p[2]),
+            announcedSeconds = ConcurrentHashMap.newKeySet<Long>().also {
+                it += text(p[14]).split(',').filter(String::isNotBlank).map(String::toLong)
+            },
             targetResults = ConcurrentHashMap<String, String>().also { results ->
-                text(p[15]).split(',').filter { '=' in it }.forEach { results[it.substringBefore('=')] = it.substringAfter('=') }
+                text(p[15]).split(',').filter { '=' in it }.forEach {
+                    results[it.substringBefore('=')] = it.substringAfter('=')
+                }
             },
             dispatchedActionKeys = ConcurrentHashMap.newKeySet<String>().also { keys ->
                 if (p.size >= 17) keys += text(p[16]).split(',').filter(String::isNotBlank)
             },
-            actionStarted = p[10].toBoolean(), maintenanceEnabled = p[11].toBoolean(),
+            actionStarted = p[10].toBoolean(),
+            maintenanceEnabled = p[11].toBoolean(),
             completedAt = p.getOrNull(17)?.takeIf(String::isNotBlank)?.let(Instant::parse),
             dryRun = p.getOrNull(18)?.toBoolean() ?: false,
+            backendArmAccepted = p.getOrNull(19)?.toBoolean() ?: false,
+            lastObservedRemainingSeconds = p.getOrNull(20)?.takeIf(String::isNotBlank)?.toLong(),
             failure = text(p[12]),
         )
     }
 
-    private fun b64(value: String): String = Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray(StandardCharsets.UTF_8))
-    private fun text(value: String): String = if (value.isBlank()) "" else String(Base64.getUrlDecoder().decode(value), StandardCharsets.UTF_8)
+    private fun b64(value: String): String = Base64.getUrlEncoder().withoutPadding()
+        .encodeToString(value.toByteArray(StandardCharsets.UTF_8))
+
+    private fun text(value: String): String = if (value.isBlank()) {
+        ""
+    } else {
+        String(Base64.getUrlDecoder().decode(value), StandardCharsets.UTF_8)
+    }
 }

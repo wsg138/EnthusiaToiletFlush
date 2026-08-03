@@ -99,6 +99,7 @@ class ConfigurateConfigAdapterTest {
         assertThat(cfg.hubServer).isEqualTo(ServerId("lobby"))
         assertThat(cfg.fallbackHubs).containsExactly(ServerId("lobby2"), ServerId("lobby3"))
         assertThat(cfg.drain.batchSize).isEqualTo(10)
+        assertThat(cfg.drain.drainLeadSeconds).isZero()
         assertThat(cfg.drain.drainOrder).isEqualTo(DrainOrder.PRIORITY_ASC)
         assertThat(cfg.rejoin.checkGateTimeoutSeconds).isEqualTo(60)
         assertThat(cfg.countdown.marksSeconds).containsExactly(60, 30, 10, 5, 1)
@@ -176,4 +177,73 @@ class ConfigurateConfigAdapterTest {
 
         assertThat(adapter.snapshot().hubServer).isEqualTo(ServerId("hub2"))
     }
+
+    @Test
+    fun `successful reload updates active countdown message and sound`(@TempDir dir: Path) {
+        val file = yaml(dir, canonical)
+        val adapter = ConfigurateConfigAdapter(file, warner = {})
+        val audience = object : com.badgersmc.queuerestart.velocity.application.ports.AudiencePort {
+            val messages = mutableListOf<String>()
+            val sounds = mutableListOf<com.badgersmc.queuerestart.velocity.application.ports.SoundCue>()
+            override fun broadcast(
+                target: ServerId,
+                miniMessage: String,
+                placeholders: Map<String, String>,
+            ) { messages += miniMessage }
+            override fun disconnect(
+                playerId: com.badgersmc.queuerestart.velocity.domain.id.PlayerId,
+                miniMessage: String,
+                placeholders: Map<String, String>,
+            ) = Unit
+            override fun playSound(
+                target: ServerId,
+                cue: com.badgersmc.queuerestart.velocity.application.ports.SoundCue,
+            ) { sounds += cue }
+        }
+        val broadcaster = com.badgersmc.queuerestart.velocity.application.schedule.CountdownBroadcaster(
+            audience = audience,
+            presentationSupplier = {
+                val cfg = adapter.snapshot()
+                com.badgersmc.queuerestart.velocity.application.schedule.CountdownPresentation(
+                    cfg.countdown.message,
+                    cfg.countdown.messageT0,
+                ) { seconds ->
+                    com.badgersmc.queuerestart.velocity.application.schedule.CountdownSoundPolicy.resolve(
+                        cfg.sounds,
+                        seconds.toLong(),
+                    )
+                }
+            },
+        )
+        val target = ServerId("survival")
+        val schedule = com.badgersmc.queuerestart.velocity.domain.countdown.CountdownSchedule(listOf(10, 5))
+        broadcaster.register(target, schedule, ServerId("lobby"), startingSeconds = 11)
+        broadcaster.tick(target, 10)
+
+        Files.writeString(
+            file,
+            canonical
+                .replace("message: \"<gold>warning\"", "message: \"<aqua>reloaded\"")
+                .replace("key: ui.button.click", "key: block.note_block.pling"),
+        )
+        adapter.reload()
+        broadcaster.tick(target, 5)
+
+        assertThat(audience.messages).containsExactly("<gold>warning", "<aqua>reloaded")
+        assertThat(audience.sounds.map { it.key }).containsExactly("ui.button.click", "block.note_block.pling")
+    }
+
+    @Test
+    fun `failed reload preserves last known good presentation`(@TempDir dir: Path) {
+        val file = yaml(dir, canonical)
+        val adapter = ConfigurateConfigAdapter(file, warner = {})
+        Files.writeString(file, canonical.replace("volume: 0.7", "volume: 2.0"))
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(adapter::reload)
+            .isInstanceOf(IllegalArgumentException::class.java)
+
+        assertThat(adapter.snapshot().countdown.message).isEqualTo("<gold>warning")
+        assertThat(adapter.snapshot().sounds["tick"]!!.key).isEqualTo("ui.button.click")
+    }
+
 }

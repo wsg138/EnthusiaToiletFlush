@@ -181,7 +181,7 @@ class ConfigurateConfigAdapter(
         return DrainConfig(
             batchSize = node.node("batch-size").requireInt(),
             batchIntervalTicks = node.node("batch-interval-ticks").requireInt(),
-            drainLeadSeconds = legacyLead,
+            drainLeadSeconds = 0,
             forceDrainTimeoutSeconds = node.node("force-drain-timeout-seconds").requireInt(),
             drainOrder = parseDrainOrder(node.node("drain-order").requireString()),
         )

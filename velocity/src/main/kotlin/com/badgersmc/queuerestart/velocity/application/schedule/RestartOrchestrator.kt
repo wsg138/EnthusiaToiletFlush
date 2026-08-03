@@ -19,6 +19,7 @@ import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import com.badgersmc.queuerestart.velocity.domain.rank.RankLadder
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * REQ-001, REQ-010, REQ-012, REQ-020, REQ-040.
@@ -61,7 +62,7 @@ class RestartOrchestrator(
         var fallbackDisconnectIssued: Boolean = false,
     )
 
-    private val state = mutableMapOf<ServerId, TargetState>()
+    private val state = ConcurrentHashMap<ServerId, TargetState>()
 
     /** Wires the inbound subscriptions on [MessagingPort]. Call once. */
     fun start() {
@@ -89,23 +90,43 @@ class RestartOrchestrator(
         }
     }
 
-    /** REQ-005. Cancels the countdown for [target] and broadcasts the cancel message. */
+    /** REQ-005. Direct legacy cancellation; inactive targets remain a no-op. */
     @Synchronized
     fun cancel(target: ServerId, now: Instant = Instant.now()) {
-        val coord = registry.all()[target] ?: return
-        if (coord.state != RestartState.ARMED && coord.state != RestartState.COUNTDOWN) return
-        val cfg = configSupplier()
-        coord.cancel()
+        cancelInternal(
+            target = target,
+            silent = options.isSilent(target),
+            now = now,
+            announceWhenInactive = false,
+        )
+    }
+
+    /**
+     * Cancellation owner for persisted server plans. It also covers plans
+     * cancelled before the ephemeral coordinator has been armed.
+     */
+    @Synchronized
+    fun cancelPlan(target: ServerId, silent: Boolean, now: Instant = Instant.now()) {
+        cancelInternal(target, silent, now, announceWhenInactive = true)
+    }
+
+    private fun cancelInternal(
+        target: ServerId,
+        silent: Boolean,
+        now: Instant,
+        announceWhenInactive: Boolean,
+    ) {
+        val coord = registry.get(target)
+        val active = coord.state == RestartState.ARMED || coord.state == RestartState.COUNTDOWN
+        if (!active && !announceWhenInactive) return
+        if (active) coord.cancel()
         broadcaster.cancel(target)
-        if (!options.isSilent(target)) {
+        if (!silent) {
+            val cfg = configSupplier()
             audience.broadcast(target, cfg.countdown.cancelMessage, mapOf("server" to target.value))
         }
         options.clear(target)
         state.remove(target)
-        // Clear any stale delivery from an older version or interrupted
-        // attempt. New restarts are not armed on the backend until after T-0
-        // drain completion, so a normal countdown cancellation has no pending
-        // shutdown to abort.
         pendingArmStore.cancel(target, now)
         messaging.sendRestartCancel(target)
     }
@@ -123,6 +144,7 @@ class RestartOrchestrator(
             CountdownSchedule(cfg.countdown.marksSeconds),
             cfg.hubServer,
             options.isSilent(target),
+            startingSeconds = durationSeconds,
         )
         s.countdownStartedAt = now
         coord.beginCountdown()
