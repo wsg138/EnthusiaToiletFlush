@@ -27,11 +27,17 @@ class Codec {
                 }
                 is RestartNowMessage -> {
                     out.writeByte(TYPE_RESTART_NOW.toInt())
+                    out.writeLong(message.deliveryId.mostSignificantBits)
+                    out.writeLong(message.deliveryId.leastSignificantBits)
                     out.writeByte(message.mode.code.toInt())
                     out.writeInt(message.delaySeconds)
                     out.writeUTF(message.argument)
                 }
-                is RestartCancelMessage -> out.writeByte(TYPE_RESTART_CANCEL.toInt())
+                is RestartCancelMessage -> {
+                    out.writeByte(TYPE_RESTART_CANCEL.toInt())
+                    out.writeLong(message.deliveryId.mostSignificantBits)
+                    out.writeLong(message.deliveryId.leastSignificantBits)
+                }
                 is CheckHacksResultMessage -> {
                     out.writeByte(TYPE_CHECK_HACKS_RESULT.toInt())
                     out.writeLong(message.playerId.mostSignificantBits)
@@ -52,13 +58,14 @@ class Codec {
                 TYPE_DRAIN_REQUEST -> DrainRequestMessage.also { requireFullyConsumed(input) }
                 TYPE_DRAIN_ACK -> DrainAckMessage(input.readInt()).also { requireFullyConsumed(input) }
                 TYPE_RESTART_NOW -> {
+                    val deliveryId = UUID(input.readLong(), input.readLong())
                     val mode = RestartMode.fromCode(input.readByte())
                     val delaySeconds = input.readInt()
                     val arg = input.readUTF()
                     requireFullyConsumed(input)
-                    RestartNowMessage(mode, arg, delaySeconds)
+                    RestartNowMessage(deliveryId, mode, arg, delaySeconds)
                 }
-                TYPE_RESTART_CANCEL -> RestartCancelMessage.also { requireFullyConsumed(input) }
+                TYPE_RESTART_CANCEL -> RestartCancelMessage(UUID(input.readLong(), input.readLong())).also { requireFullyConsumed(input) }
                 TYPE_CHECK_HACKS_RESULT -> {
                     val msb = input.readLong()
                     val lsb = input.readLong()

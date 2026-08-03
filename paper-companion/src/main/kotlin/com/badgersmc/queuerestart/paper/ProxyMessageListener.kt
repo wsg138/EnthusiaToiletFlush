@@ -1,84 +1,107 @@
 package com.badgersmc.queuerestart.paper
 
 import com.badgersmc.queuerestart.common.protocol.CheckHacksResultMessage
-import com.badgersmc.queuerestart.common.protocol.Codec
 import com.badgersmc.queuerestart.common.protocol.DrainAckMessage
 import com.badgersmc.queuerestart.common.protocol.RestartCancelMessage
+import com.badgersmc.queuerestart.common.protocol.RestartMode
 import com.badgersmc.queuerestart.common.protocol.RestartNowMessage
+import com.badgersmc.queuerestart.common.security.AuthenticatedMessageCodec
+import com.badgersmc.queuerestart.common.security.ControlDirection
 import org.bukkit.entity.Player
 import org.bukkit.plugin.Plugin
 import org.bukkit.plugin.messaging.PluginMessageListener
+import java.util.concurrent.atomic.AtomicLong
 import java.util.logging.Level
 
-/**
- * REQ-021, implementation.md §6.
- *
- * Inbound: receives `qrestart:v1` plugin messages from the proxy, decodes
- * via [Codec], dispatches [RestartNowMessage] to [RestartExecutor].
- * Other proxy→backend frames (just `DrainRequest` today) are advisory and
- * ignored — the proxy already drains by moving players via the queue API.
- *
- * Outbound: companion-side senders use [sendDrainAck] / [sendCheckHacksResult]
- * which round-trip through any online player (Bukkit requires a Player to
- * pin the channel). On an empty server the call is dropped with a warning.
- */
+/** Authenticated proxy-to-backend control-channel endpoint. */
 class ProxyMessageListener(
     private val plugin: Plugin,
+    private val serverId: String,
     private val executor: RestartExecutor,
-    private val codec: Codec = Codec(),
+    private val codec: AuthenticatedMessageCodec,
 ) : PluginMessageListener {
+    private val nextInvalidWarningAtMillis = AtomicLong(0)
 
     override fun onPluginMessageReceived(channel: String, player: Player, message: ByteArray) {
         if (channel != CHANNEL) return
         val frame = try {
-            codec.decode(message)
-        } catch (t: Throwable) {
-            plugin.logger.log(Level.WARNING, "queue-restart: malformed inbound frame", t)
+            codec.decode(message, ControlDirection.PROXY_TO_BACKEND, serverId)
+        } catch (error: IllegalArgumentException) {
+            warnInvalidFrame(error.message ?: "invalid authenticated frame")
+            return
+        } catch (error: Throwable) {
+            plugin.logger.log(Level.WARNING, "queue-restart: control frame decode failed", error)
             return
         }
+
         when (frame) {
             is RestartNowMessage -> {
-                try {
-                    plugin.logger.info(
-                        "queue-restart: RestartNow received (mode=${frame.mode}, delaySeconds=${frame.delaySeconds})"
+                if (frame.mode != RestartMode.SHUTDOWN) {
+                    plugin.logger.warning(
+                        "queue-restart: rejected authenticated non-SHUTDOWN restart mode ${frame.mode}",
                     )
-                    executor.execute(frame.mode, frame.argument, frame.delaySeconds)
-                } catch (t: Throwable) {
-                    plugin.logger.log(Level.SEVERE, "queue-restart: RestartNow execution failed", t)
+                    return
+                }
+                try {
+                    val accepted = executor.execute(
+                        frame.deliveryId,
+                        frame.mode,
+                        frame.argument,
+                        frame.delaySeconds,
+                    )
+                    plugin.logger.info(
+                        if (accepted) {
+                            "queue-restart: accepted RestartNow ${frame.deliveryId} (delaySeconds=${frame.delaySeconds})"
+                        } else {
+                            "queue-restart: ignored duplicate RestartNow ${frame.deliveryId}"
+                        },
+                    )
+                } catch (error: Throwable) {
+                    plugin.logger.log(Level.SEVERE, "queue-restart: RestartNow execution failed", error)
                 }
             }
             is RestartCancelMessage -> {
-                val cancelled = executor.abort()
+                val cancelled = executor.abort(frame.deliveryId)
                 plugin.logger.info(
-                    if (cancelled) "queue-restart: RestartCancel received — pending shutdown aborted"
-                    else "queue-restart: RestartCancel received — no pending shutdown to abort"
+                    if (cancelled) {
+                        "queue-restart: accepted RestartCancel ${frame.deliveryId}; pending shutdown aborted"
+                    } else {
+                        "queue-restart: accepted RestartCancel ${frame.deliveryId}; no pending shutdown existed"
+                    },
                 )
             }
-            else -> {
-                // DrainRequest is advisory; CheckHacksResult/DrainAck are
-                // backend→proxy and should never appear on this side.
-            }
+            else -> Unit
         }
     }
 
     fun sendDrainAck(remainingPlayers: Int) {
-        send(codec.encode(DrainAckMessage(remainingPlayers)))
+        send(codec.encode(DrainAckMessage(remainingPlayers), ControlDirection.BACKEND_TO_PROXY, serverId))
     }
 
     fun sendCheckHacksResult(message: CheckHacksResultMessage) {
-        send(codec.encode(message))
+        send(codec.encode(message, ControlDirection.BACKEND_TO_PROXY, serverId))
     }
 
     private fun send(payload: ByteArray) {
-        val any = plugin.server.onlinePlayers.firstOrNull()
-        if (any == null) {
-            plugin.logger.warning("queue-restart: cannot send to proxy (no online players)")
+        val carrier = plugin.server.onlinePlayers.firstOrNull()
+        if (carrier == null) {
+            plugin.logger.warning("queue-restart: cannot send plugin message; no online player is available")
             return
         }
-        any.sendPluginMessage(plugin, CHANNEL, payload)
+        carrier.sendPluginMessage(plugin, CHANNEL, payload)
+    }
+
+    private fun warnInvalidFrame(reason: String) {
+        val now = System.currentTimeMillis()
+        val allowedAt = nextInvalidWarningAtMillis.get()
+        if (now < allowedAt || !nextInvalidWarningAtMillis.compareAndSet(allowedAt, now + INVALID_WARNING_INTERVAL_MILLIS)) {
+            return
+        }
+        plugin.logger.warning("queue-restart: rejected invalid control frame: $reason")
     }
 
     companion object {
-        const val CHANNEL: String = "qrestart:v1"
+        const val CHANNEL = "qrestart:v1"
+        private const val INVALID_WARNING_INTERVAL_MILLIS = 30_000L
     }
 }

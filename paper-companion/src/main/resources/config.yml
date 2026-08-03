@@ -1,41 +1,24 @@
-# queue-restart-companion config
+# EnthusiaToiletFlush Paper companion
 #
-# Each backend Paper JVM owns its own restart clock. The proxy's
-# queue-restart plugin should mirror these times in its own schedules
-# block so the countdown + drain on the proxy line up with the actual
-# Bukkit.shutdown() that fires here.
-#
-# restart-times: list of daily HH:mm strings, 24-hour, in [time-zone].
-# The companion re-arms each entry after firing, so the schedule loops
-# forever without external nudging.
-
+# Velocity is the only schedule owner. A non-empty legacy restart-times list
+# makes this plugin fail startup so two independent restart clocks cannot run.
 restart-times: []
-time-zone: "America/New_York"
 
-# How long before a scheduled restart the proxy should start its
-# countdown / drain choreography. Advertised to the proxy via the SLP
-# discovery channel — proxy uses this to start broadcasting warnings.
-warn-minutes: 30
-
-# SECURITY (REQ-090, finding C). The schedule is published as a synthetic
-# Server-List-Ping sample entry. Anyone who can reach this backend's
-# Minecraft port and sends a status ping will see restart times + zone
-# + warn-minutes. Default: only loopback / private (RFC1918) / link-local
-# peers get the announcement — covers proxy-on-LAN deployments without
-# leaking schedule to the public internet. Set to `all` to restore
-# pre-patch behavior at your own risk (e.g. if a remote proxy needs to
-# poll over WAN).
-schedule-announce-peers: "private"
-
-# Inverse-SLP poll: companion identifies itself to the proxy via a magic
-# handshake hostname (`QR_POLL:<server-id>`) and pulls any pending arm
-# the proxy has stored. Closes the "console-armed restart with no
-# players on target" gap. Set proxy-host to whatever address the
-# companion can reach the proxy on (often "127.0.0.1" or the panel's
-# proxy LAN address).
+# Address this backend uses to reach the Velocity Minecraft listener. Keep this
+# path on loopback or a private/firewalled network whenever possible.
 proxy-host: "127.0.0.1"
 proxy-port: 25565
-# Must match the name configured in the proxy's `[servers]` table —
-# this is how the proxy looks up which backend the poll is for.
-server-id: "lobby2"
+
+# Must exactly match this backend's name in Velocity's server registry and in
+# network-restart.servers.
+server-id: "CHANGE_ME"
+
+# Signed heartbeat and acknowledged restart-delivery polling interval.
 arm-poll-seconds: 5
+
+# Shared HMAC secret. Set the same environment variable on Velocity and every
+# Paper backend. Use at least 32 random bytes. Startup fails closed when it is
+# missing, short, whitespace-padded, or a placeholder. Rotating it requires a
+# coordinated restart of Velocity and all companions.
+control-secret: ${QUEUE_RESTART_CONTROL_SECRET}
+maximum-clock-skew-seconds: 45

@@ -9,6 +9,7 @@ import java.util.UUID
  * Mirrors what `RestartNowMessage` carries on the plugin-message path.
  */
 data class PendingArm(
+    val deliveryId: UUID,
     val delaySeconds: Int,
     val mode: RestartMode,
     val argument: String,
@@ -31,28 +32,22 @@ object ArmEncoding {
 
     fun encode(arm: PendingArm): String {
         require(arm.delaySeconds >= 0) { "delaySeconds must be ≥ 0" }
-        return "$PREFIX${arm.delaySeconds}:${arm.mode.name}:${arm.argument}"
+        require(arm.mode == RestartMode.SHUTDOWN) { "only SHUTDOWN arms are supported" }
+        require(arm.argument.isEmpty()) { "SHUTDOWN arms must not contain an argument" }
+        return "$PREFIX${arm.deliveryId}:${arm.delaySeconds}:${arm.mode.name}:${arm.argument}"
     }
 
     fun decode(name: String): PendingArm? {
         if (!name.startsWith(PREFIX)) return null
         val body = name.substring(PREFIX.length)
-        val firstColon = body.indexOf(':')
-        if (firstColon < 0) return null
-        val delayStr = body.substring(0, firstColon)
-        val rest = body.substring(firstColon + 1)
-        val secondColon = rest.indexOf(':')
-        if (secondColon < 0) return null
-        val modeStr = rest.substring(0, secondColon)
-        val argument = rest.substring(secondColon + 1)
-        val delaySeconds = delayStr.toIntOrNull() ?: return null
+        val parts = body.split(':', limit = 4)
+        if (parts.size != 4) return null
+        val deliveryId = runCatching { UUID.fromString(parts[0]) }.getOrNull() ?: return null
+        val delaySeconds = parts[1].toIntOrNull() ?: return null
         if (delaySeconds < 0) return null
-        val mode = try {
-            RestartMode.valueOf(modeStr)
-        } catch (_: IllegalArgumentException) {
-            return null
-        }
-        return PendingArm(delaySeconds, mode, argument)
+        val mode = runCatching { RestartMode.valueOf(parts[2]) }.getOrNull() ?: return null
+        if (mode != RestartMode.SHUTDOWN || parts[3].isNotEmpty()) return null
+        return PendingArm(deliveryId, delaySeconds, mode, parts[3])
     }
 }
 

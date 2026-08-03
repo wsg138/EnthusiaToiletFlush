@@ -1,13 +1,11 @@
 package com.badgersmc.queuerestart.paper
 
-import com.badgersmc.queuerestart.common.schedule.BackendSchedule
+import com.badgersmc.queuerestart.common.schedule.AuthenticatedPollProtocol
+import com.badgersmc.queuerestart.common.security.AuthenticatedMessageCodec
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
 import org.bukkit.plugin.EventExecutor
 import org.bukkit.plugin.java.JavaPlugin
-import java.time.LocalTime
-import java.time.ZoneId
-import java.time.format.DateTimeParseException
 import java.util.UUID
 import java.util.logging.Level
 
@@ -25,12 +23,20 @@ import java.util.logging.Level
 class CompanionPlugin : JavaPlugin() {
 
     private lateinit var listener: ProxyMessageListener
-    private var restartTimer: RestartTimer? = null
     private var armPoller: ProxyArmPoller? = null
     private val bridge = CheckHacksBridge()
 
     override fun onEnable() {
         saveDefaultConfig()
+
+        val serverId = resolveServerId()
+        val secret = resolveControlSecret()
+        val maximumClockSkew = config.getLong("maximum-clock-skew-seconds", 45)
+        require(maximumClockSkew in 10..300) {
+            "queue-restart: maximum-clock-skew-seconds must be 10..300"
+        }
+        val authenticatedCodec = AuthenticatedMessageCodec(secret, maxClockSkewSeconds = maximumClockSkew)
+        val processedDeliveries = ProcessedDeliveryStore(dataFolder.toPath().resolve("processed-deliveries.state"))
 
         val scheduler = RestartScheduler { delaySeconds, action ->
             // Bukkit ticks at 20 Hz. delay==0 still goes through runTaskLater
@@ -38,16 +44,16 @@ class CompanionPlugin : JavaPlugin() {
             val task = server.scheduler.runTaskLater(this, Runnable { action() }, delaySeconds * 20L)
             object : ScheduledHandle { override fun cancel() = task.cancel() }
         }
-        val executor = RestartExecutor(BukkitServerControl(), scheduler)
-        listener = ProxyMessageListener(this, executor)
+        val executor = RestartExecutor(BukkitServerControl(), scheduler, processedDeliveries)
+        listener = ProxyMessageListener(this, serverId, executor, authenticatedCodec)
 
         server.messenger.registerIncomingPluginChannel(this, ProxyMessageListener.CHANNEL, listener)
         server.messenger.registerOutgoingPluginChannel(this, ProxyMessageListener.CHANNEL)
 
         installCheckHacksListener()
 
-        startRestartTimer()
-        startArmPoller(executor)
+        rejectLegacyLocalTimer()
+        startArmPoller(serverId, executor, secret, maximumClockSkew)
 
         logger.info("queue-restart-companion enabled. checkhacks=${bridge.isCheckHacksAvailable()}")
     }
@@ -58,86 +64,67 @@ class CompanionPlugin : JavaPlugin() {
      * cache by server-id and a misconfigured backend would silently drop
      * any arm. Better to log + skip than fire on the wrong target.
      */
-    private fun startArmPoller(executor: RestartExecutor) {
-        val serverId = config.getString("server-id").orEmpty().trim()
-        if (serverId.isEmpty()) {
-            logger.warning("queue-restart: server-id not set in config; arm poller disabled")
-            return
+    private fun startArmPoller(
+        serverId: String,
+        executor: RestartExecutor,
+        secret: String,
+        maximumClockSkew: Long,
+    ) {
+        val host = config.getString("proxy-host", "127.0.0.1").orEmpty().trim()
+        require(host.isNotEmpty() && host.length <= 253 && '\u0000' !in host) {
+            "queue-restart: proxy-host must be a non-empty hostname or IP address"
         }
-        val host = config.getString("proxy-host", "127.0.0.1") ?: "127.0.0.1"
-        val port = config.getInt("proxy-port", 25565).coerceIn(1, 65535)
-        val every = config.getInt("arm-poll-seconds", 5).coerceAtLeast(1)
+        val port = config.getInt("proxy-port", 25565)
+        require(port in 1..65535) { "queue-restart: proxy-port must be 1..65535" }
+        val every = config.getInt("arm-poll-seconds", 5)
+        require(every in 1..60) { "queue-restart: arm-poll-seconds must be 1..60" }
+        val bootId = UUID.randomUUID()
         armPoller = ProxyArmPoller(
             plugin = this,
             proxyHost = host,
             proxyPort = port,
             serverId = serverId,
+            bootId = bootId,
             executor = executor,
+            protocol = AuthenticatedPollProtocol(secret, maxClockSkewSeconds = maximumClockSkew),
             pollIntervalSeconds = every,
         ).also { it.start() }
     }
 
     override fun onDisable() {
-        restartTimer?.stop()
-        restartTimer = null
         armPoller?.stop()
         armPoller = null
         server.messenger.unregisterIncomingPluginChannel(this)
         server.messenger.unregisterOutgoingPluginChannel(this)
     }
 
-    /**
-     * Read `restart-times` + `time-zone` from config.yml and start the local
-     * scheduler. Borrowed from xGinko/ServerRestarts: each backend JVM owns
-     * its own restart clock and triggers `Bukkit.shutdown()` directly so
-     * panel-hosted servers (no shared filesystem with the proxy, no extra
-     * ports) restart on schedule without any cross-process signal.
-     */
-    private fun startRestartTimer() {
-        val zone = parseZone(config.getString("time-zone")) ?: ZoneId.systemDefault().also {
-            logger.warning("queue-restart: invalid time-zone in config; falling back to system default $it")
+    private fun rejectLegacyLocalTimer() {
+        val configured = config.getStringList("restart-times")
+        require(configured.isEmpty()) {
+            "queue-restart: restart-times is no longer supported on Paper; " +
+                "move every entry to Velocity automatic-schedules before enabling this jar"
         }
-        val raw = config.getStringList("restart-times")
-        val times = raw.mapNotNull { parseTime(it) }
-        if (raw.size != times.size) {
-            logger.warning("queue-restart: ${raw.size - times.size} restart-times entries failed to parse and were ignored")
-        }
-        val warnMinutes = config.getInt("warn-minutes", 30).coerceAtLeast(0)
-
-        // Always announce the schedule via SLP, even when empty — proxy
-        // distinguishes "no times" (no scheduled restart) from "no announce"
-        // (cold-start cache miss) by the presence of the marker entry.
-        val peerFilter = when (config.getString("schedule-announce-peers")?.lowercase()) {
-            "all" -> SchedulePingListener.PeerFilter.ALL
-            else -> SchedulePingListener.PeerFilter.PRIVATE_ONLY
-        }
-        server.pluginManager.registerEvents(
-            SchedulePingListener(BackendSchedule(times, zone, warnMinutes), peerFilter),
-            this,
-        )
-
-        if (times.isEmpty()) {
-            logger.info("queue-restart: no restart-times configured; relying on proxy /schedrestart for ad-hoc restarts")
-            return
-        }
-        restartTimer = RestartTimer(
-            plugin = this,
-            times = times,
-            zone = zone,
-            shutdown = { server.shutdown() },
-        ).also { it.start() }
-        logger.info("queue-restart: local restart timer started (${times.size} time(s), zone=$zone, warn=${warnMinutes}m)")
     }
 
-    private fun parseZone(raw: String?): ZoneId? = try {
-        raw?.let { ZoneId.of(it) }
-    } catch (_: Exception) { null }
 
-    private fun parseTime(raw: String): LocalTime? = try {
-        LocalTime.parse(raw.trim())
-    } catch (_: DateTimeParseException) {
-        logger.warning("queue-restart: cannot parse restart-time '$raw' (expected HH:mm)")
-        null
+    private fun resolveServerId(): String {
+        val configured = config.getString("server-id").orEmpty().trim()
+        require(configured.matches(Regex("[A-Za-z0-9_.-]{1,64}"))) {
+            "queue-restart: server-id must match [A-Za-z0-9_.-]{1,64}"
+        }
+        require(!configured.contains("CHANGE_ME", ignoreCase = true)) {
+            "queue-restart: server-id is still a placeholder"
+        }
+        return configured
+    }
+
+    private fun resolveControlSecret(): String {
+        val configured = config.getString("control-secret").orEmpty()
+        val envMatch = Regex("^\\$\\{([A-Z0-9_]+)}$").matchEntire(configured)
+        val resolved = if (envMatch == null) configured else System.getenv(envMatch.groupValues[1]).orEmpty()
+        // Constructor validation enforces minimum length and rejects placeholders.
+        com.badgersmc.queuerestart.common.security.ControlAuthenticator.validateSecret(resolved)
+        return resolved
     }
 
     /**

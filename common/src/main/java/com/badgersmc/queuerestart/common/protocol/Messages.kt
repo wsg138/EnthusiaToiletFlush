@@ -32,6 +32,7 @@ enum class RestartMode(val code: Byte) {
  * which keeps the restart on schedule even if the channel goes quiet later.
  */
 data class RestartNowMessage(
+    val deliveryId: UUID,
     val mode: RestartMode,
     val argument: String,
     val delaySeconds: Int = 0,
@@ -44,7 +45,7 @@ data class RestartNowMessage(
  * `Bukkit.shutdown()` after `delaySeconds` elapses. Idempotent — if the
  * companion has no pending shutdown the message is a no-op.
  */
-object RestartCancelMessage : Message
+data class RestartCancelMessage(val deliveryId: UUID) : Message
 
 enum class CheckOutcome(val code: Byte) {
     CLEAN(0x01),

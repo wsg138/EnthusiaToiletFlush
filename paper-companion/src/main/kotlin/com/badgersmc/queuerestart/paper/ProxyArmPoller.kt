@@ -2,56 +2,49 @@ package com.badgersmc.queuerestart.paper
 
 import com.badgersmc.queuerestart.common.protocol.RestartMode
 import com.badgersmc.queuerestart.common.schedule.ArmEncoding
-import com.badgersmc.queuerestart.common.schedule.CancelEncoding
-import com.badgersmc.queuerestart.common.schedule.ProxyPollHandshake
+import com.badgersmc.queuerestart.common.schedule.AuthenticatedPollProtocol
+import com.badgersmc.queuerestart.common.schedule.CompanionCapabilities
+import com.badgersmc.queuerestart.common.schedule.PollSignalKind
 import org.bukkit.plugin.Plugin
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import java.util.logging.Level
 
 /**
- * REQ-022. Polls the proxy via Server-List-Ping using a magic
- * `QR_POLL:<server-id>` handshake hostname, parses any pending-arm
- * sample player from the response and dispatches it to [RestartExecutor].
- *
- * Why SLP and not plugin messages: plugin-message channels need an
- * online player on this backend; SLP doesn't. A console-armed restart
- * with no players on the target couldn't reach us via the channel; this
- * inverse SLP path closes that gap.
- *
- * Cadence is conservative ([pollIntervalSeconds] default 5). One in-flight
- * poll at a time. Failures are logged at FINE and don't surface unless
- * they persist (we don't want a noisy log when the proxy is briefly down).
+ * Authenticated, acknowledged, player-independent restart delivery and heartbeat.
+ * Every poll is signed and carries a stable JVM boot id. Signals are signed back
+ * to the exact request nonce, then acknowledged only after the companion has
+ * durably accepted the delivery id through [RestartExecutor].
  */
 class ProxyArmPoller(
     private val plugin: Plugin,
     private val proxyHost: String,
     private val proxyPort: Int,
     private val serverId: String,
+    private val bootId: UUID,
     private val executor: RestartExecutor,
+    private val protocol: AuthenticatedPollProtocol,
     private val pollIntervalSeconds: Int = 5,
     private val socketTimeoutMillis: Int = 3_000,
 ) {
-
     @Volatile private var taskId: Int = -1
     @Volatile private var inFlight: Boolean = false
     @Volatile private var consecutiveFailures: Int = 0
-    @Volatile private var lastSignalEncoded: String? = null
 
     fun start() {
         if (taskId != -1) return
-        // runTaskTimerAsynchronously: SLP I/O on Bukkit main thread would
-        // freeze tick. The poll itself is read-only network — handing it
-        // to an async worker is safe.
         val periodTicks = pollIntervalSeconds.toLong() * 20L
-        taskId = plugin.server.scheduler.runTaskTimerAsynchronously(plugin, Runnable {
-            pollOnce()
-        }, periodTicks, periodTicks).taskId
+        taskId = plugin.server.scheduler.runTaskTimerAsynchronously(plugin, Runnable(::pollOnce), 1L, periodTicks).taskId
         plugin.logger.info(
-            "queue-restart: arm poller started (proxy=$proxyHost:$proxyPort, server-id=$serverId, every ${pollIntervalSeconds}s)"
+            "queue-restart: authenticated arm/heartbeat poller started " +
+                "(proxy=$proxyHost:$proxyPort, server-id=$serverId, boot-id=$bootId, every ${pollIntervalSeconds}s)",
         )
     }
 
@@ -65,68 +58,45 @@ class ProxyArmPoller(
         if (inFlight) return
         inFlight = true
         try {
-            val response = fetchStatusJson()
-            val match = SIGNAL_REGEX.find(response) ?: run {
-                consecutiveFailures = 0
-                lastSignalEncoded = null
-                return
-            }
-            val encoded = match.value
-            // Same arm shouldn't fire twice if the proxy somehow re-emits
-            // it; rely on consume() proxy-side, but defend in depth here.
-            if (encoded == lastSignalEncoded) return
-            lastSignalEncoded = encoded
-
-            if (CancelEncoding.isCancel(encoded)) {
-                plugin.server.scheduler.runTask(plugin, Runnable {
-                    val cancelled = executor.abort()
-                    plugin.logger.info(
-                        if (cancelled) "queue-restart: SLP poll-back delivered cancellation; pending shutdown aborted"
-                        else "queue-restart: SLP poll-back delivered cancellation; no pending shutdown to abort"
-                    )
-                })
+            val request = protocol.newRequest(serverId, bootId, CompanionCapabilities.REQUIRED)
+            val response = fetchStatusJson(protocol.encodeRequest(request))
+            val encoded = SIGNAL_REGEX.find(response)?.value ?: run {
                 consecutiveFailures = 0
                 return
             }
+            val signal = protocol.decodeSignal(serverId, request.nonce, encoded) ?: run {
+                plugin.logger.warning("queue-restart: rejected invalid authenticated poll signal")
+                return
+            }
 
-            val arm = ArmEncoding.decode(encoded) ?: run {
-                plugin.logger.warning("queue-restart: ignoring undecodable arm payload from proxy: $encoded")
-                return
-            }
-            // SECURITY (REQ-090, findings #8 + D): the SLP poll-back path
-            // is unauthenticated until the HMAC work lands in Phase 2.
-            // Until then, restrict to SHUTDOWN so a misconfigured
-            // proxy-host or attacker who answers our poll port cannot
-            // hand us a COMMAND mode that executes via console
-            // (op-self, ban-everyone, etc.) or a non-zero EXIT_CODE that
-            // a supervisor interprets specially.
-            if (arm.mode != RestartMode.SHUTDOWN) {
-                plugin.logger.warning(
-                    "queue-restart: REJECTED non-SHUTDOWN arm via SLP poll-back (mode=${arm.mode}); " +
-                            "only SHUTDOWN is accepted on this path. Enable plugin-message channel for trusted modes."
-                )
-                return
-            }
-            plugin.logger.info(
-                "queue-restart: SLP poll-back delivered arm (delay=${arm.delaySeconds}s, mode=${arm.mode}); scheduling shutdown"
-            )
-            // Hop to main thread so the executor's Bukkit scheduler hand-off works.
-            plugin.server.scheduler.runTask(plugin, Runnable {
-                try {
-                    executor.execute(arm.mode, arm.argument, arm.delaySeconds)
-                } catch (t: Throwable) {
-                    plugin.logger.log(Level.SEVERE, "queue-restart: executor failed on SLP-delivered arm", t)
+            val accepted = when (signal.kind) {
+                PollSignalKind.CANCEL -> runOnMainThread {
+                    executor.abort(signal.deliveryId)
+                    true
                 }
-            })
+                PollSignalKind.ARM -> {
+                    val arm = ArmEncoding.decode(signal.payload) ?: run {
+                        plugin.logger.warning("queue-restart: rejected malformed authenticated arm")
+                        return
+                    }
+                    if (arm.deliveryId != signal.deliveryId || arm.mode != RestartMode.SHUTDOWN) {
+                        plugin.logger.warning("queue-restart: rejected mismatched or non-SHUTDOWN poll arm")
+                        return
+                    }
+                    runOnMainThread {
+                        executor.execute(arm.deliveryId, arm.mode, arm.argument, arm.delaySeconds.coerceAtLeast(1))
+                        true
+                    }
+                }
+            }
+            if (accepted) acknowledge(signal.deliveryId)
             consecutiveFailures = 0
         } catch (t: Throwable) {
             consecutiveFailures++
-            // Throttle the warning so a transiently unreachable proxy
-            // doesn't spam the log every 5s.
             if (consecutiveFailures == 1 || consecutiveFailures % 12 == 0) {
                 plugin.logger.log(
-                    Level.FINE,
-                    "queue-restart: arm poll failed (#$consecutiveFailures): ${t.javaClass.simpleName}: ${t.message}",
+                    Level.WARNING,
+                    "queue-restart: authenticated control poll failed (#$consecutiveFailures): ${t.javaClass.simpleName}: ${t.message}",
                 )
             }
         } finally {
@@ -134,52 +104,64 @@ class ProxyArmPoller(
         }
     }
 
-    /** Open TCP, send handshake + status request, read JSON, return as String. */
-    private fun fetchStatusJson(): String {
+    private fun acknowledge(deliveryId: UUID) {
+        val request = protocol.newRequest(
+            serverId = serverId,
+            bootId = bootId,
+            capabilities = CompanionCapabilities.REQUIRED,
+            acknowledgement = deliveryId,
+        )
+        // The response is irrelevant; a successfully written/read status exchange
+        // proves Velocity processed the signed ACK. Repeated ACKs are idempotent.
+        fetchStatusJson(protocol.encodeRequest(request))
+    }
+
+    private fun runOnMainThread(action: () -> Boolean): Boolean {
+        val result = CompletableFuture<Boolean>()
+        plugin.server.scheduler.runTask(plugin, Runnable {
+            runCatching(action).fold(result::complete) { result.completeExceptionally(it) }
+        })
+        return result.get(5, TimeUnit.SECONDS)
+    }
+
+    private fun fetchStatusJson(hostname: String): String {
         Socket().use { socket ->
             socket.soTimeout = socketTimeoutMillis
             socket.connect(InetSocketAddress(proxyHost, proxyPort), socketTimeoutMillis)
             val out = DataOutputStream(socket.getOutputStream())
-            val `in` = DataInputStream(socket.getInputStream())
+            val input = DataInputStream(socket.getInputStream())
 
-            val hostname = ProxyPollHandshake.formatHostname(serverId)
-            // Handshake packet (0x00):
-            //   protocol_version (varint, -1 for "any")
-            //   server_address   (string)
-            //   server_port      (unsigned short)
-            //   next_state       (varint, 1 = status)
-            val hs = java.io.ByteArrayOutputStream()
-            val hsOut = DataOutputStream(hs)
-            writeVarInt(hsOut, 0x00)               // packet id
-            writeVarInt(hsOut, -1)                 // protocol version
+            val handshake = ByteArrayOutputStream()
+            val hsOut = DataOutputStream(handshake)
+            writeVarInt(hsOut, 0x00)
+            writeVarInt(hsOut, -1)
             writeString(hsOut, hostname)
             hsOut.writeShort(proxyPort)
-            writeVarInt(hsOut, 1)                  // next state: status
-            writePacket(out, hs.toByteArray())
+            writeVarInt(hsOut, 1)
+            writePacket(out, handshake.toByteArray())
 
-            // Status Request packet (0x00, empty payload).
-            val req = java.io.ByteArrayOutputStream()
-            writeVarInt(DataOutputStream(req), 0x00)
-            writePacket(out, req.toByteArray())
+            val request = ByteArrayOutputStream()
+            writeVarInt(DataOutputStream(request), 0x00)
+            writePacket(out, request.toByteArray())
             out.flush()
 
-            // Read Status Response packet:
-            //   length (varint)
-            //   packet_id (varint, expect 0x00)
-            //   json_string (string)
-            readVarInt(`in`) // length — we read remainder by JSON length
-            val packetId = readVarInt(`in`)
+            val packetLength = readVarInt(input)
+            require(packetLength in 1..MAX_STATUS_PACKET_BYTES) { "invalid status packet length $packetLength" }
+            val packet = ByteArray(packetLength)
+            input.readFully(packet)
+            val packetInput = DataInputStream(packet.inputStream())
+            val packetId = readVarInt(packetInput)
             require(packetId == 0x00) { "unexpected status packet id $packetId" }
-            return readString(`in`)
+            val json = readString(packetInput, MAX_STATUS_JSON_BYTES)
+            require(packetInput.available() == 0) { "trailing bytes in status packet" }
+            return json
         }
     }
 
     companion object {
-        // Stops at a quote so we don't hoover up surrounding JSON. The
-        // sample-player name is JSON-escaped, but neither QR_ARM:'s
-        // delimiter ':' nor RestartMode names need escaping, so a literal
-        // match works.
-        private val SIGNAL_REGEX = Regex("QR_(?:ARM:[^\"]*|CANCEL)")
+        private const val MAX_STATUS_PACKET_BYTES = 64 * 1024
+        private const val MAX_STATUS_JSON_BYTES = 60 * 1024
+        private val SIGNAL_REGEX = Regex("QR2S:[A-Za-z0-9_:\\-]*")
 
         private fun writeVarInt(out: DataOutputStream, valueIn: Int) {
             var value = valueIn
@@ -190,29 +172,32 @@ class ProxyArmPoller(
             }
         }
 
-        private fun readVarInt(`in`: DataInputStream): Int {
+        private fun readVarInt(input: DataInputStream): Int {
             var result = 0
             var shift = 0
             while (true) {
-                val b = `in`.readByte().toInt()
+                val b = input.readUnsignedByte()
                 result = result or ((b and 0x7F) shl shift)
                 if ((b and 0x80) == 0) return result
                 shift += 7
-                if (shift >= 35) error("VarInt too big")
+                require(shift < 35) { "VarInt too big" }
             }
         }
 
-        private fun writeString(out: DataOutputStream, s: String) {
-            val bytes = s.toByteArray(StandardCharsets.UTF_8)
+        private fun writeString(out: DataOutputStream, value: String) {
+            val bytes = value.toByteArray(StandardCharsets.UTF_8)
+            require(bytes.size <= 255) { "handshake hostname exceeds 255 bytes" }
             writeVarInt(out, bytes.size)
             out.write(bytes)
         }
 
-        private fun readString(`in`: DataInputStream): String {
-            val len = readVarInt(`in`)
-            val buf = ByteArray(len)
-            `in`.readFully(buf)
-            return String(buf, StandardCharsets.UTF_8)
+        private fun readString(input: DataInputStream, maximumBytes: Int): String {
+            val length = readVarInt(input)
+            require(length in 0..maximumBytes) { "invalid status string length $length" }
+            require(length <= input.available()) { "truncated status string" }
+            val bytes = ByteArray(length)
+            input.readFully(bytes)
+            return String(bytes, StandardCharsets.UTF_8)
         }
 
         private fun writePacket(out: DataOutputStream, payload: ByteArray) {
