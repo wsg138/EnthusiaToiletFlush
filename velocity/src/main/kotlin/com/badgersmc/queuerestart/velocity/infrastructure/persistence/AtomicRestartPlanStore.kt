@@ -13,6 +13,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.time.Duration
 import java.time.Instant
 import java.util.Base64
 import java.util.UUID
@@ -34,6 +35,7 @@ class AtomicRestartPlanStore(
             require(decoded.map(RestartPlan::id).distinct().size == decoded.size) {
                 "restart state contains duplicate plan ids"
             }
+            decoded.forEach(::reconcileRecoveredProxyProcess)
             decoded
         } catch (error: Exception) {
             val backup = path.resolveSibling("${path.fileName}.corrupt-${System.currentTimeMillis()}")
@@ -155,6 +157,57 @@ class AtomicRestartPlanStore(
         )
     }
 
+    /**
+     * Loading this state necessarily happens in a new Velocity process. If the
+     * previous process durably recorded the proxy action before it exited, the
+     * new process is stronger completion evidence than an HTTP callback that
+     * may have been lost while Pterodactyl terminated the old JVM.
+     *
+     * The action key must already be in [RestartPlan.dispatchedActionKeys]; a
+     * merely prepared plan remains fail-closed. Proxy-only plans can complete
+     * immediately. Full-network plans resume authenticated backend boot
+     * verification with a fresh bounded window.
+     */
+    private fun reconcileRecoveredProxyProcess(plan: RestartPlan) {
+        if (plan.type !in setOf(PlanType.PROXY, PlanType.NETWORK)) return
+        if (plan.state !in setOf(PlanState.DISPATCHING, PlanState.NEEDS_REVIEW)) return
+        if (!plan.actionStarted || plan.proxyBaselineBootId == null) return
+
+        val proxyActionKey = "${plan.id}:proxy"
+        if (proxyActionKey !in plan.dispatchedActionKeys) return
+
+        plan.acceptedActionKeys += proxyActionKey
+        plan.targetResults.putIfAbsent(
+            proxyActionKey,
+            "proxy process replacement observed after durable dispatch",
+        )
+
+        if (plan.type == PlanType.PROXY) {
+            plan.state = PlanState.COMPLETED
+            plan.completedAt = Instant.now()
+            plan.maintenanceEnabled = false
+            plan.executionDeadlineAt = null
+            plan.failure = ""
+            plan.targetResults["verification"] =
+                "Velocity process was replaced after a durably dispatched proxy restart"
+            warning("restart plan ${plan.id} completed from recovered proxy process evidence")
+            return
+        }
+
+        val backendActionKeys = plan.targets.mapTo(mutableSetOf()) { "${plan.id}:${it.value}" }
+        val backendEvidenceComplete =
+            plan.baselineBootIds.keys == plan.targets &&
+                backendActionKeys.all { it in plan.dispatchedActionKeys && it in plan.acceptedActionKeys }
+        if (!backendEvidenceComplete) return
+
+        plan.state = PlanState.DISPATCHING
+        plan.maintenanceEnabled = true
+        plan.executionDeadlineAt = Instant.now().plus(RECOVERY_VERIFICATION_WINDOW)
+        if (plan.failure.isNotBlank()) plan.targetResults.putIfAbsent("recovery", plan.failure)
+        plan.failure = ""
+        warning("restart plan ${plan.id} resumed backend boot verification after proxy replacement")
+    }
+
     private fun encodeStringMap(values: Map<String, String>): String =
         "v2:" + values.entries.sortedBy(Map.Entry<String, String>::key).joinToString(",") {
             "${b64(it.key)}=${b64(it.value)}"
@@ -217,6 +270,7 @@ class AtomicRestartPlanStore(
     }
 
     companion object {
+        private val RECOVERY_VERIFICATION_WINDOW: Duration = Duration.ofMinutes(10)
         private const val LEGACY_FIELD_COUNT = 16
         private const val MAX_PLAN_COUNT = 10_000
         private const val MAX_RECORD_CHARS = 256_000

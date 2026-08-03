@@ -12,6 +12,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class AtomicRestartPlanStoreTest {
     @TempDir lateinit var temp: Path
@@ -33,7 +34,7 @@ class AtomicRestartPlanStoreTest {
             state = PlanState.DISPATCHING,
             actionStarted = true,
             maintenanceEnabled = false,
-            baselineBootIds = java.util.concurrent.ConcurrentHashMap(mapOf(target to baseline)),
+            baselineBootIds = ConcurrentHashMap(mapOf(target to baseline)),
             proxyBaselineBootId = proxy,
             executionDeadlineAt = now.plusSeconds(600),
         ).also {
@@ -49,6 +50,116 @@ class AtomicRestartPlanStoreTest {
         assertThat(restored.proxyBaselineBootId).isEqualTo(proxy)
         assertThat(restored.executionDeadlineAt).isEqualTo(now.plusSeconds(600))
         assertThat(restored.acceptedActionKeys).containsExactly("action")
+    }
+
+    @Test
+    fun `proxy replacement completes a durably dispatched plan when its callback was lost`() {
+        val path = temp.resolve("network-restarts.state")
+        val now = Instant.now()
+        val plan = RestartPlan(
+            type = PlanType.PROXY,
+            targets = emptySet(),
+            createdAt = now.minusSeconds(120),
+            executionAt = now.minusSeconds(60),
+            warningAt = now.minusSeconds(180),
+            creator = "console",
+            state = PlanState.NEEDS_REVIEW,
+            actionStarted = true,
+            maintenanceEnabled = true,
+            proxyBaselineBootId = UUID.randomUUID(),
+            executionDeadlineAt = now.minusSeconds(1),
+            failure = "persisted execution is missing durable action acceptance",
+        ).also {
+            it.dispatchedActionKeys += "${it.id}:proxy"
+        }
+        val warnings = mutableListOf<String>()
+        val store = AtomicRestartPlanStore(path, warnings::add)
+        store.save(listOf(plan))
+
+        val restored = store.load().single()
+        val proxyKey = "${restored.id}:proxy"
+        assertThat(restored.state).isEqualTo(PlanState.COMPLETED)
+        assertThat(restored.acceptedActionKeys).contains(proxyKey)
+        assertThat(restored.targetResults["verification"]).contains("durably dispatched")
+        assertThat(restored.maintenanceEnabled).isFalse()
+        assertThat(restored.executionDeadlineAt).isNull()
+        assertThat(restored.failure).isEmpty()
+        assertThat(restored.completedAt).isNotNull()
+        assertThat(warnings).anyMatch {
+            it.contains(restored.id.toString()) && it.contains("completed")
+        }
+    }
+
+    @Test
+    fun `network replacement resumes backend verification when only proxy callback was lost`() {
+        val path = temp.resolve("network-restarts.state")
+        val hub = ServerId("HUB")
+        val smp = ServerId("SMP")
+        val now = Instant.now()
+        val plan = RestartPlan(
+            type = PlanType.NETWORK,
+            targets = setOf(hub, smp),
+            createdAt = now.minusSeconds(120),
+            executionAt = now.minusSeconds(60),
+            warningAt = now.minusSeconds(180),
+            creator = "console",
+            state = PlanState.NEEDS_REVIEW,
+            actionStarted = true,
+            maintenanceEnabled = true,
+            baselineBootIds = ConcurrentHashMap(
+                mapOf(hub to UUID.randomUUID(), smp to UUID.randomUUID()),
+            ),
+            proxyBaselineBootId = UUID.randomUUID(),
+            executionDeadlineAt = now.minusSeconds(1),
+            failure = "persisted execution is missing durable action acceptance",
+        ).also {
+            val hubKey = "${it.id}:${hub.value}"
+            val smpKey = "${it.id}:${smp.value}"
+            it.dispatchedActionKeys += setOf(hubKey, smpKey, "${it.id}:proxy")
+            it.acceptedActionKeys += setOf(hubKey, smpKey)
+        }
+        val warnings = mutableListOf<String>()
+        val store = AtomicRestartPlanStore(path, warnings::add)
+        store.save(listOf(plan))
+
+        val beforeLoad = Instant.now()
+        val restored = store.load().single()
+        val proxyKey = "${restored.id}:proxy"
+        assertThat(restored.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(restored.acceptedActionKeys).contains(proxyKey)
+        assertThat(restored.maintenanceEnabled).isTrue()
+        assertThat(restored.failure).isEmpty()
+        assertThat(restored.executionDeadlineAt).isAfter(beforeLoad.plusSeconds(500))
+        assertThat(warnings).anyMatch {
+            it.contains(restored.id.toString()) && it.contains("resumed")
+        }
+    }
+
+    @Test
+    fun `prepared but undispatched proxy plan remains unresolved`() {
+        val path = temp.resolve("network-restarts.state")
+        val now = Instant.now()
+        val plan = RestartPlan(
+            type = PlanType.PROXY,
+            targets = emptySet(),
+            createdAt = now.minusSeconds(120),
+            executionAt = now.minusSeconds(60),
+            warningAt = now.minusSeconds(180),
+            creator = "console",
+            state = PlanState.NEEDS_REVIEW,
+            actionStarted = true,
+            maintenanceEnabled = true,
+            proxyBaselineBootId = UUID.randomUUID(),
+            executionDeadlineAt = now.minusSeconds(1),
+            failure = "restart handoff was prepared but publication was not durably confirmed",
+        )
+        val store = AtomicRestartPlanStore(path) {}
+        store.save(listOf(plan))
+
+        val restored = store.load().single()
+        assertThat(restored.state).isEqualTo(PlanState.NEEDS_REVIEW)
+        assertThat(restored.acceptedActionKeys).isEmpty()
+        assertThat(restored.maintenanceEnabled).isTrue()
     }
 
     @Test
