@@ -31,19 +31,26 @@ data class RestartPlan(
     val creator: String,
     val automaticKey: String? = null,
     val silent: Boolean = false,
-    var state: PlanState = PlanState.SCHEDULED,
+    @Volatile var state: PlanState = PlanState.SCHEDULED,
     val announcedSeconds: MutableSet<Long> = ConcurrentHashMap.newKeySet(),
     val targetResults: MutableMap<String, String> = ConcurrentHashMap(),
     val dispatchedActionKeys: MutableSet<String> = ConcurrentHashMap.newKeySet(),
-    var actionStarted: Boolean = false,
-    var maintenanceEnabled: Boolean = false,
-    var dryRun: Boolean = false,
+    val acceptedActionKeys: MutableSet<String> = ConcurrentHashMap.newKeySet(),
+    @Volatile var actionStarted: Boolean = false,
+    @Volatile var maintenanceEnabled: Boolean = false,
+    @Volatile var dryRun: Boolean = false,
     /** True only after the ephemeral backend coordinator accepted this plan. */
-    var backendArmAccepted: Boolean = false,
+    @Volatile var backendArmAccepted: Boolean = false,
+    /** Authenticated backend JVM identities captured immediately before destructive action. */
+    val baselineBootIds: MutableMap<ServerId, UUID> = ConcurrentHashMap(),
+    /** Velocity process identity captured before a proxy-including power action. */
+    @Volatile var proxyBaselineBootId: UUID? = null,
+    /** Deadline for observing the expected authenticated boot transitions. */
+    @Volatile var executionDeadlineAt: Instant? = null,
     /** Previous observed countdown value used to detect crossed warning marks. */
-    var lastObservedRemainingSeconds: Long? = null,
+    @Volatile var lastObservedRemainingSeconds: Long? = null,
     /** Wall-clock time at which this plan's restart action completed. */
-    var completedAt: Instant? = null,
+    @Volatile var completedAt: Instant? = null,
     var failure: String = "",
 ) {
     fun active(): Boolean = state in setOf(
@@ -55,4 +62,7 @@ data class RestartPlan(
     )
 
     fun cancellable(): Boolean = state in setOf(PlanState.SCHEDULED, PlanState.COUNTING_DOWN)
+
+    /** Unresolved destructive state blocks every overlapping future restart. */
+    fun blocksScheduling(): Boolean = active() || state == PlanState.NEEDS_REVIEW
 }

@@ -22,8 +22,17 @@ data class QueueRestartConfig(
     val sounds: Map<String, SoundCue>,
     val rankLadder: Map<String, Int>,
     val rankDefault: Int,
+    val controlSecurity: ControlSecurityConfig = ControlSecurityConfig(),
     val networkRestart: NetworkRestartConfig = NetworkRestartConfig.disabled(),
     val schedules: List<ConfiguredRestartSchedule> = emptyList(),
+)
+
+
+data class ControlSecurityConfig(
+    val secret: String = "",
+    val heartbeatTimeoutSeconds: Long = 20,
+    val maximumClockSkewSeconds: Long = 45,
+    val backendExecutionTimeoutSeconds: Long = 600,
 )
 
 data class NetworkRestartConfig(

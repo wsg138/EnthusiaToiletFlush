@@ -59,17 +59,17 @@ class RestartOrchestratorTest {
     }
 
     private class FakeMessaging : MessagingPort {
-        data class RestartCall(val server: ServerId, val mode: RestartMode, val arg: String, val delaySeconds: Int)
+        data class RestartCall(val server: ServerId, val deliveryId: UUID, val mode: RestartMode, val arg: String, val delaySeconds: Int)
         val drainSent = mutableListOf<ServerId>()
         val restartSent = mutableListOf<RestartCall>()
         val cancelSent = mutableListOf<ServerId>()
         var checkResultHandler: ((ServerId, PlayerId, CheckOutcome) -> Unit)? = null
         var drainAckHandler: ((ServerId, Int) -> Unit)? = null
         override fun sendDrainRequest(target: ServerId) { drainSent += target }
-        override fun sendRestartNow(target: ServerId, mode: RestartMode, argument: String, delaySeconds: Int) {
-            restartSent += RestartCall(target, mode, argument, delaySeconds)
+        override fun sendRestartNow(target: ServerId, deliveryId: UUID, mode: RestartMode, argument: String, delaySeconds: Int) {
+            restartSent += RestartCall(target, deliveryId, mode, argument, delaySeconds)
         }
-        override fun sendRestartCancel(target: ServerId) { cancelSent += target }
+        override fun sendRestartCancel(target: ServerId, deliveryId: UUID) { cancelSent += target }
         override fun onDrainAck(handler: (ServerId, Int) -> Unit) { drainAckHandler = handler }
         override fun onCheckHacksResult(handler: (ServerId, PlayerId, CheckOutcome) -> Unit) {
             checkResultHandler = handler
@@ -134,6 +134,8 @@ class RestartOrchestratorTest {
         )
         val gate = CheckGate(timeoutSeconds = 60, releaseOnTimeout = true)
         val rejoin = RejoinService(proxy, FakeQueue(), RankLadder(emptyMap(), 0), gate)
+        val baselineBootId = UUID.randomUUID()
+        val published = mutableListOf<Pair<ServerId, UUID>>()
         val orch = RestartOrchestrator(
             registry = registry,
             proxy = proxy,
@@ -149,9 +151,14 @@ class RestartOrchestratorTest {
             restartMode = RestartMode.SHUTDOWN,
             restartArg = "",
             pendingArmStore = pendingArmStore,
+            companionIdentity = { baselineBootId },
+            onRestartPublished = { target, baseline ->
+                published += target to baseline
+                true
+            },
         )
         orch.start()
-        return orch to Bundle(registry, proxy, messaging, audience, gate, pendingArmStore)
+        return orch to Bundle(registry, proxy, messaging, audience, gate, pendingArmStore, baselineBootId, published)
     }
 
     private data class Bundle(
@@ -161,6 +168,8 @@ class RestartOrchestratorTest {
         val audience: FakeAudience,
         val gate: CheckGate,
         val pendingArmStore: com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore,
+        val baselineBootId: UUID,
+        val published: MutableList<Pair<ServerId, UUID>>,
     )
 
     private fun cohort(vararg names: String) = Cohort(names.map { CohortMember(pid(it)) }.toSet())
@@ -179,7 +188,7 @@ class RestartOrchestratorTest {
     }
 
     @Test
-    fun `cancel before T-0 publishes only a cancellation tombstone`() {
+    fun `cancel before T-0 clears unpublished delivery without transport cancellation`() {
         val (orch, b) = setup()
         b.registry.get(survival).arm(cohort("alice"), durationSeconds = 60)
         val now = Instant.parse("2026-01-01T00:00:00Z")
@@ -188,9 +197,8 @@ class RestartOrchestratorTest {
         orch.cancel(survival, now)
 
         assertThat(b.pendingArmStore.peek(survival, now = now)).isNull()
-        assertThat(b.pendingArmStore.consumeDelivery(survival, now = now))
-            .isEqualTo(com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore.Delivery.Cancel)
-        assertThat(b.messaging.cancelSent).containsExactly(survival)
+        assertThat(b.pendingArmStore.peekDelivery(survival, now = now)).isNull()
+        assertThat(b.messaging.cancelSent).isEmpty()
     }
 
     @Test
@@ -228,6 +236,7 @@ class RestartOrchestratorTest {
 
         val t0 = Instant.parse("2026-01-01T00:00:00Z")
         orch.tick(t0)
+        assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
         orch.tick(t0.plusSeconds(59))
         assertThat(b.registry.get(survival).state).isEqualTo(RestartState.COUNTDOWN)
         assertThat(proxy.transfers).isEmpty()
@@ -251,6 +260,7 @@ class RestartOrchestratorTest {
 
         val t0 = Instant.parse("2026-01-01T00:00:00Z")
         orch.tick(t0)
+        assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
         orch.tick(t0.plusSeconds(60))
 
         assertThat(proxy.transfers).hasSize(2)
@@ -266,6 +276,7 @@ class RestartOrchestratorTest {
 
         val t0 = Instant.parse("2026-01-01T00:00:00Z")
         orch.tick(t0)
+        assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
         assertThat(b.messaging.restartSent).isEmpty()
 
         val restartAt = t0.plusSeconds(60)
@@ -274,9 +285,12 @@ class RestartOrchestratorTest {
         val restart = b.messaging.restartSent.single()
         assertThat(restart.server).isEqualTo(survival)
         assertThat(restart.delaySeconds).isZero()
-        assertThat(b.pendingArmStore.peek(survival, restartAt))
-            .isEqualTo(com.badgersmc.queuerestart.common.schedule.PendingArm(0, RestartMode.SHUTDOWN, ""))
+        val pending = b.pendingArmStore.peek(survival, restartAt)
+        assertThat(pending?.deliveryId).isEqualTo(restart.deliveryId)
+        assertThat(pending?.delaySeconds).isZero()
+        assertThat(pending?.mode).isEqualTo(RestartMode.SHUTDOWN)
         assertThat(b.registry.get(survival).state).isEqualTo(RestartState.RESTART_SENT)
+        assertThat(b.published).containsExactly(survival to b.baselineBootId)
     }
 
     @Test
@@ -291,6 +305,7 @@ class RestartOrchestratorTest {
 
         val t0 = Instant.parse("2026-01-01T00:00:00Z")
         orch.tick(t0)
+        assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
         orch.tick(t0.plusSeconds(10))
         assertThat(b.audience.disconnects).isEmpty()
 
@@ -323,6 +338,7 @@ class RestartOrchestratorTest {
 
         val t0 = Instant.parse("2026-01-01T00:00:00Z")
         orch.tick(t0)
+        assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
         orch.tick(t0.plusSeconds(10))
         orch.tick(t0.plusSeconds(70))
 
@@ -385,7 +401,7 @@ class RestartOrchestratorTest {
         orch.cancelPlan(survival, silent = true)
 
         assertThat(b.audience.broadcasts.count { it.contains("cancel") }).isEqualTo(1)
-        assertThat(b.messaging.cancelSent).containsExactly(survival, survival)
+        assertThat(b.messaging.cancelSent).isEmpty()
     }
 
     @Test
@@ -399,7 +415,7 @@ class RestartOrchestratorTest {
         orch.cancel(survival, now)
 
         assertThat(b.audience.broadcasts.count { it.contains("cancel") }).isEqualTo(1)
-        assertThat(b.messaging.cancelSent).containsExactly(survival)
+        assertThat(b.messaging.cancelSent).isEmpty()
     }
 
 }

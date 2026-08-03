@@ -21,6 +21,7 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.ConcurrentHashMap
@@ -75,7 +76,8 @@ class NetworkRestartServiceTest {
 
         assertThat(events).containsSubsequence("disconnect", "restart:proxy")
         assertThat(control.maintenanceEnables).isEqualTo(1)
-        assertThat(control.maintenanceDisables).isEqualTo(1)
+        assertThat(control.maintenanceDisables).isEqualTo(1) // startup reconciliation only
+        assertThat(service.allPlans().single().state).isEqualTo(PlanState.DISPATCHING)
     }
 
     @Test
@@ -211,7 +213,7 @@ class NetworkRestartServiceTest {
 
         service.tick(now.plusSeconds(2))
 
-        assertThat(plan.state).isEqualTo(PlanState.COMPLETED)
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
         assertThat(executor.realRestartCalls).isEqualTo(1)
         assertThat(executor.dryRunRestartCalls).isZero()
     }
@@ -262,12 +264,112 @@ class NetworkRestartServiceTest {
         assertThat(recovered.lastCompletedServerRestart(hub)?.id).isEqualTo(networkRestart.id)
     }
 
+    @Test
+    fun `accepted proxy action completes only in a replacement Velocity process`() {
+        val store = MemoryStore()
+        val executor = FakeExecutor(mutableListOf())
+        val oldBoot = UUID.fromString("10000000-0000-0000-0000-000000000001")
+        val newBoot = UUID.fromString("10000000-0000-0000-0000-000000000002")
+        val now = Instant.now()
+        val first = service(FakeControl(), executor, store, proxyBootId = oldBoot)
+        val plan = first.createManual(PlanType.PROXY, emptySet(), now.plusSeconds(1), now, "", "console", false)
+
+        first.tick(now.plusSeconds(2))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+
+        val replacement = service(FakeControl(), executor, store, proxyBootId = newBoot)
+        replacement.tick(now.plusSeconds(3))
+        assertThat(replacement.allPlans().single().state).isEqualTo(PlanState.COMPLETED)
+    }
+
+    @Test
+    fun `full network completion waits for every backend and proxy boot identity`() {
+        val store = MemoryStore()
+        val boots = mutableMapOf(
+            hub to UUID.fromString("20000000-0000-0000-0000-000000000001"),
+            smp to UUID.fromString("20000000-0000-0000-0000-000000000002"),
+        )
+        val oldProxy = UUID.fromString("20000000-0000-0000-0000-000000000010")
+        val newProxy = UUID.fromString("20000000-0000-0000-0000-000000000011")
+        val now = Instant.now()
+        val first = service(FakeControl(), store = store, backendBoots = boots, proxyBootId = oldProxy)
+        first.createManual(PlanType.NETWORK, setOf(hub, smp), now.plusSeconds(1), now, "", "console", false)
+        first.tick(now.plusSeconds(2))
+
+        val replacement = service(FakeControl(), store = store, backendBoots = boots, proxyBootId = newProxy)
+        replacement.tick(now.plusSeconds(3))
+        assertThat(replacement.allPlans().single().state).isEqualTo(PlanState.DISPATCHING)
+
+        boots[hub] = UUID.fromString("20000000-0000-0000-0000-000000000101")
+        replacement.tick(now.plusSeconds(4))
+        assertThat(replacement.allPlans().single().state).isEqualTo(PlanState.DISPATCHING)
+
+        boots[smp] = UUID.fromString("20000000-0000-0000-0000-000000000102")
+        replacement.tick(now.plusSeconds(5))
+        assertThat(replacement.allPlans().single().state).isEqualTo(PlanState.COMPLETED)
+    }
+
+    @Test
+    fun `server completion requires published handoff and changed companion boot id`() {
+        val boots = mutableMapOf(
+            hub to UUID.fromString("30000000-0000-0000-0000-000000000001"),
+            smp to UUID.fromString("30000000-0000-0000-0000-000000000002"),
+        )
+        val now = Instant.now()
+        val service = service(FakeControl(), backendBoots = boots)
+        val plan = service.createManual(PlanType.SERVER, setOf(smp), now.plusSeconds(1), now, "", "console", false)
+        service.tick(now)
+        service.tick(now.plusSeconds(2))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(plan.actionStarted).isFalse()
+
+        assertThat(service.markBackendHandoffPublished(smp, boots.getValue(smp))).isTrue()
+        service.tick(now.plusSeconds(3))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+
+        boots[smp] = UUID.fromString("30000000-0000-0000-0000-000000000102")
+        service.tick(now.plusSeconds(4))
+        assertThat(plan.state).isEqualTo(PlanState.COMPLETED)
+    }
+
+    @Test
+    fun `needs review remains fail closed and blocks overlapping schedules`() {
+        val store = MemoryStore()
+        val now = Instant.now()
+        val review = RestartPlan(
+            type = PlanType.PROXY,
+            targets = emptySet(),
+            createdAt = now.minusSeconds(30),
+            executionAt = now.minusSeconds(10),
+            warningAt = now.minusSeconds(40),
+            creator = "console",
+            state = PlanState.NEEDS_REVIEW,
+            maintenanceEnabled = false,
+            failure = "uncertain",
+        )
+        store.save(listOf(review))
+        val control = FakeControl()
+        val service = service(control, store = store)
+
+        service.tick(now.plusSeconds(120))
+        assertThat(control.maintenanceEnables).isGreaterThanOrEqualTo(2)
+        org.assertj.core.api.Assertions.assertThatThrownBy {
+            service.createManual(PlanType.PROXY, emptySet(), now.plusSeconds(600), now, "", "console", false)
+        }.isInstanceOf(IllegalArgumentException::class.java)
+    }
+
     private fun service(
         control: FakeControl,
         executor: ExternalRestartExecutor = FakeExecutor(mutableListOf()),
         store: RestartPlanStore = MemoryStore(),
         backendCancel: (ServerId) -> Unit = {},
         schedules: List<ConfiguredRestartSchedule> = emptyList(),
+        backendBoots: MutableMap<ServerId, UUID> = mutableMapOf(
+            hub to UUID.fromString("00000000-0000-0000-0000-000000000001"),
+            smp to UUID.fromString("00000000-0000-0000-0000-000000000002"),
+        ),
+        proxyBootId: UUID = UUID.fromString("00000000-0000-0000-0000-000000000010"),
+        prepareBackendHandoff: (ServerId, UUID) -> Boolean = { _, _ -> true },
     ): NetworkRestartService {
         val config = NetworkRestartConfig.disabled().copy(
             enabled = true,
@@ -275,6 +377,7 @@ class NetworkRestartServiceTest {
             proxyServerId = "proxy1234",
             members = listOf(hub, smp),
             hubServers = listOf(hub),
+            backendHeadStartSeconds = 0,
         )
         return NetworkRestartService(
             config = { config },
@@ -285,6 +388,9 @@ class NetworkRestartServiceTest {
             backendArm = { server, seconds, _ -> SchedCommandResult.Armed(server, seconds) },
             backendCancel = backendCancel,
             audit = { _, _ -> },
+            backendIdentity = { backendBoots[it] },
+            prepareBackendHandoff = prepareBackendHandoff,
+            currentProxyBootId = proxyBootId,
         )
     }
 
@@ -396,6 +502,8 @@ class NetworkRestartServiceTest {
             announcedSeconds = ConcurrentHashMap.newKeySet<Long>().also { it += plan.announcedSeconds },
             targetResults = ConcurrentHashMap(plan.targetResults),
             dispatchedActionKeys = ConcurrentHashMap.newKeySet<String>().also { it += plan.dispatchedActionKeys },
+            acceptedActionKeys = ConcurrentHashMap.newKeySet<String>().also { it += plan.acceptedActionKeys },
+            baselineBootIds = ConcurrentHashMap(plan.baselineBootIds),
         )
     }
 

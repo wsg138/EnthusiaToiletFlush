@@ -30,9 +30,10 @@ enum class GateOutcome {
  * registering players and ticking expirations.
  */
 class CheckGate(
-    private val timeoutSeconds: Int,
-    private val releaseOnTimeout: Boolean,
+    private val timeoutSeconds: () -> Int,
+    private val releaseOnTimeout: () -> Boolean,
 ) {
+    constructor(timeoutSeconds: Int, releaseOnTimeout: Boolean) : this({ timeoutSeconds }, { releaseOnTimeout })
 
     private data class PendingEntry(val deadlineSeconds: Long)
 
@@ -46,7 +47,7 @@ class CheckGate(
             pending.remove(playerId)
             return GateOutcome.RELEASED
         }
-        pending[playerId] = PendingEntry(deadlineSeconds = nowSeconds + timeoutSeconds)
+        pending[playerId] = PendingEntry(deadlineSeconds = nowSeconds + timeoutSeconds())
         return GateOutcome.PENDING
     }
 
@@ -56,7 +57,7 @@ class CheckGate(
         return when (outcome) {
             CheckOutcome.CLEAN, CheckOutcome.PROTECTED -> GateOutcome.RELEASED
             CheckOutcome.DETECTED -> GateOutcome.DROPPED
-            CheckOutcome.TIMEOUT -> if (releaseOnTimeout) GateOutcome.RELEASED else GateOutcome.DROPPED
+            CheckOutcome.TIMEOUT -> if (releaseOnTimeout()) GateOutcome.RELEASED else GateOutcome.DROPPED
         }
     }
 
@@ -67,7 +68,7 @@ class CheckGate(
     fun tick(nowSeconds: Long): List<Pair<PlayerId, GateOutcome>> {
         val expired = pending.entries.filter { it.value.deadlineSeconds <= nowSeconds }
         if (expired.isEmpty()) return emptyList()
-        val outcome = if (releaseOnTimeout) GateOutcome.RELEASED else GateOutcome.DROPPED
+        val outcome = if (releaseOnTimeout()) GateOutcome.RELEASED else GateOutcome.DROPPED
         for ((pid, _) in expired) pending.remove(pid)
         return expired.map { it.key to outcome }
     }

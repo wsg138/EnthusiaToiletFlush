@@ -6,7 +6,9 @@ import java.util.UUID
 @JvmInline
 value class ServerId(val value: String) {
     init {
-        require(value.isNotBlank()) { "ServerId must be non-blank" }
+        require(value.matches(Regex("[A-Za-z0-9_.-]{1,64}"))) {
+            "ServerId must match [A-Za-z0-9_.-]{1,64}"
+        }
     }
 }
 

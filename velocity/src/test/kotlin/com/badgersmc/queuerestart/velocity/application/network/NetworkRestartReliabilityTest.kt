@@ -17,6 +17,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.ConcurrentHashMap
@@ -251,6 +252,10 @@ class NetworkRestartReliabilityTest {
         },
         serverCancellationOwner: ((ServerId, Boolean) -> Unit)? = null,
         soundResolver: (Long) -> SoundCue? = { null },
+        backendBoots: MutableMap<ServerId, UUID> = mutableMapOf(
+            hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
+            smp to UUID.fromString("40000000-0000-0000-0000-000000000002"),
+        ),
     ): NetworkRestartService {
         val config = NetworkRestartConfig.disabled().copy(
             enabled = true,
@@ -273,6 +278,9 @@ class NetworkRestartReliabilityTest {
             audit = { _, _ -> },
             serverCancellationOwner = serverCancellationOwner,
             soundResolver = soundResolver,
+            backendIdentity = { backendBoots[it] },
+            prepareBackendHandoff = { _, _ -> true },
+            currentProxyBootId = UUID.fromString("40000000-0000-0000-0000-000000000010"),
         )
     }
 
@@ -304,6 +312,8 @@ class NetworkRestartReliabilityTest {
             announcedSeconds = ConcurrentHashMap.newKeySet<Long>().also { it += plan.announcedSeconds },
             targetResults = ConcurrentHashMap(plan.targetResults),
             dispatchedActionKeys = ConcurrentHashMap.newKeySet<String>().also { it += plan.dispatchedActionKeys },
+            acceptedActionKeys = ConcurrentHashMap.newKeySet<String>().also { it += plan.acceptedActionKeys },
+            baselineBootIds = ConcurrentHashMap(plan.baselineBootIds),
         )
     }
 }

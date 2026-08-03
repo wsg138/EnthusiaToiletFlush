@@ -55,7 +55,7 @@ class RestartCoordinatorTest {
         assertThat(c.state).isEqualTo(RestartState.COUNTDOWN)
         c.beginDrain()
         assertThat(c.state).isEqualTo(RestartState.DRAINING)
-        c.restartSent()
+        c.restartSent(UUID.randomUUID())
         assertThat(c.state).isEqualTo(RestartState.RESTART_SENT)
         c.serverDown()
         assertThat(c.state).isEqualTo(RestartState.SERVER_DOWN)
@@ -105,7 +105,7 @@ class RestartCoordinatorTest {
             it.arm(cohort, 60)
             it.beginCountdown()
             it.beginDrain()
-            it.restartSent()
+            it.restartSent(UUID.randomUUID())
         }
         assertThatThrownBy { c.cancel() }
             .isInstanceOf(IllegalStateException::class.java)
@@ -130,7 +130,7 @@ class RestartCoordinatorTest {
             it.arm(cohort, 60)
             it.beginCountdown()
         }
-        assertThatThrownBy { c.restartSent() }
+        assertThatThrownBy { c.restartSent(UUID.randomUUID()) }
             .isInstanceOf(IllegalStateException::class.java)
     }
 
@@ -140,7 +140,7 @@ class RestartCoordinatorTest {
             it.arm(cohort, 60)
             it.beginCountdown()
             it.beginDrain()
-            it.restartSent()
+            it.restartSent(UUID.randomUUID())
         }
         assertThatThrownBy { c.serverUp() }
             .isInstanceOf(IllegalStateException::class.java)
@@ -166,7 +166,7 @@ class RestartCoordinatorTest {
         c.arm(cohort, 60)
         c.beginCountdown()
         c.beginDrain()
-        c.restartSent()
+        c.restartSent(UUID.randomUUID())
         c.serverDown()
         c.serverUp()
         c.releaseComplete()

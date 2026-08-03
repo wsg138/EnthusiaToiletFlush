@@ -5,99 +5,69 @@ import com.badgersmc.queuerestart.common.schedule.PendingArm
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 
-/**
- * REQ-022. Per-server ephemeral slot for the most recent pending arm.
- *
- * `put` overwrites; `peek` reads without clearing; `consume` reads + clears.
- * Entries expire after a TTL so a forgotten arm doesn't shut a backend down
- * an hour later when it finally polls. The companion-side poll cadence is
- * seconds, so a 60s default TTL is generous.
- */
 class PendingArmStoreTest {
-
-    private val lobby2 = ServerId("lobby2")
-    private val survival = ServerId("survival")
-    private val arm = PendingArm(60, RestartMode.SHUTDOWN, "")
+    private val server = ServerId("survival")
     private val t0 = Instant.parse("2026-05-09T12:00:00Z")
+    private val boot = UUID.randomUUID()
 
     @Test
-    fun `put then peek returns the arm without clearing`() {
+    fun `polling peeks repeatedly and only matching authenticated acknowledgement removes delivery`() {
         val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
-
-        assertThat(store.peek(lobby2, now = t0)).isEqualTo(arm)
-        assertThat(store.peek(lobby2, now = t0)).isEqualTo(arm)
+        val id = store.put(server, RestartMode.SHUTDOWN, "", 0, boot, t0)
+        assertThat(store.peekDelivery(server, t0)?.id).isEqualTo(id)
+        assertThat(store.peekDelivery(server, t0)?.id).isEqualTo(id)
+        assertThat(store.acknowledge(server, UUID.randomUUID(), t0)).isFalse()
+        assertThat(store.peekDelivery(server, t0)).isNotNull
+        assertThat(store.acknowledge(server, id, t0)).isTrue()
+        assertThat(store.peekDelivery(server, t0)).isNull()
     }
 
     @Test
-    fun `consume returns the arm and clears the slot`() {
-        val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
-
-        assertThat(store.consume(lobby2, now = t0)).isEqualTo(arm)
-        assertThat(store.peek(lobby2, now = t0)).isNull()
+    fun `expired delivery is removed without acknowledgement`() {
+        val store = PendingArmStore(ttl = Duration.ofSeconds(10))
+        store.put(server, RestartMode.SHUTDOWN, "", 0, boot, t0)
+        assertThat(store.peekDelivery(server, t0.plusSeconds(11))).isNull()
     }
 
     @Test
-    fun `peek and consume return null after TTL expiry`() {
+    fun `replacement JVM cannot receive an arm targeted at the previous boot`() {
         val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
+        val id = store.put(server, RestartMode.SHUTDOWN, "", 0, boot, t0)
 
-        val later = t0.plusSeconds(61)
-        assertThat(store.peek(lobby2, now = later)).isNull()
-        assertThat(store.consume(lobby2, now = later)).isNull()
+        assertThat(store.peekDeliveryForBoot(server, UUID.randomUUID(), t0)?.id).isNull()
+        assertThat(store.peekDelivery(server, t0)).isNull()
+        assertThat(store.acknowledge(server, id, t0)).isFalse()
     }
 
     @Test
-    fun `put on a server with an existing entry overwrites`() {
-        val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
-        val newer = PendingArm(120, RestartMode.SHUTDOWN, "")
-        store.put(lobby2, newer, now = t0.plusSeconds(5))
-
-        assertThat(store.consume(lobby2, now = t0.plusSeconds(5))).isEqualTo(newer)
+    fun `cancel replaces arm and is acknowledged by its own id`() {
+        val store = PendingArmStore()
+        store.put(server, RestartMode.SHUTDOWN, "", 0, boot, t0)
+        val cancelId = store.cancel(server, boot, t0.plusSeconds(1))
+        val pending = store.peekDelivery(server, t0.plusSeconds(2))
+        assertThat(pending?.id).isEqualTo(cancelId)
+        assertThat(pending?.delivery).isEqualTo(PendingArmStore.Delivery.Cancel)
+        assertThat(store.acknowledge(server, cancelId, t0.plusSeconds(2))).isTrue()
     }
 
     @Test
-    fun `entries are partitioned by ServerId`() {
-        val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
+    fun `pending delivery survives proxy restart`(@TempDir temp: Path) {
+        val file = temp.resolve("pending.state")
+        val first = PendingArmStore(persistencePath = file)
+        val id = UUID.randomUUID()
+        val arm = PendingArm(id, 1, RestartMode.SHUTDOWN, "")
+        first.put(server, arm, boot, t0)
 
-        assertThat(store.peek(survival, now = t0)).isNull()
-        assertThat(store.consume(lobby2, now = t0)).isEqualTo(arm)
-        assertThat(store.peek(survival, now = t0)).isNull()
-    }
-
-    @Test
-    fun `clear removes the slot manually`() {
-        val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
-        store.clear(lobby2)
-        assertThat(store.peek(lobby2, now = t0)).isNull()
-    }
-
-    @Test
-    fun `cancel replaces an undelivered arm with a tombstone`() {
-        val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.put(lobby2, arm, now = t0)
-
-        store.cancel(lobby2, now = t0.plusSeconds(1))
-
-        assertThat(store.consumeDelivery(lobby2, now = t0.plusSeconds(2)))
-            .isEqualTo(PendingArmStore.Delivery.Cancel)
-    }
-
-    @Test
-    fun `a new arm replaces an older cancellation tombstone`() {
-        val store = PendingArmStore(ttl = Duration.ofSeconds(60))
-        store.cancel(lobby2, now = t0)
-
-        store.put(lobby2, arm, now = t0.plusSeconds(1))
-
-        assertThat(store.consumeDelivery(lobby2, now = t0.plusSeconds(2)))
-            .isEqualTo(PendingArmStore.Delivery.Arm(arm))
+        val restored = PendingArmStore(persistencePath = file)
+        val pending = restored.peekDelivery(server, t0.plusSeconds(1))
+        assertThat(pending?.id).isEqualTo(id)
+        assertThat(pending?.expectedBootId).isEqualTo(boot)
+        assertThat(pending?.delivery).isEqualTo(PendingArmStore.Delivery.Arm(arm))
     }
 }

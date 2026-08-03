@@ -1,7 +1,11 @@
 package com.badgersmc.queuerestart.velocity
 
 import com.badgersmc.queuerestart.common.protocol.RestartMode
+import com.badgersmc.queuerestart.common.schedule.AuthenticatedPollProtocol
+import com.badgersmc.queuerestart.common.security.AuthenticatedMessageCodec
+import com.badgersmc.queuerestart.common.security.ControlAuthenticator
 import com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore
+import com.badgersmc.queuerestart.velocity.application.companion.CompanionRegistry
 import com.badgersmc.queuerestart.velocity.application.drain.DrainPlanner
 import com.badgersmc.queuerestart.velocity.application.drain.HubResolver
 import com.badgersmc.queuerestart.velocity.application.drain.PingPoller
@@ -56,6 +60,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Duration
+import java.util.UUID
 
 /**
  * Velocity entrypoint. On `ProxyInitializeEvent`:
@@ -89,6 +94,10 @@ class QueueRestartPlugin @Inject constructor(
             logger.warn("config: {}", warning)
         }
         val cfgSnapshot: () -> QueueRestartConfig = { config.snapshot() }
+        val controlSecret = cfgSnapshot().controlSecurity.secret
+        ControlAuthenticator.validateSecret(controlSecret)
+        val companionRegistry = CompanionRegistry()
+        val proxyBootId = UUID.randomUUID()
 
         // Probe set must include rank-ladder nodes so VelocityProxyServerBackend
         // can surface them via permissionsOf for the rank ladder (REQ-033).
@@ -96,6 +105,13 @@ class QueueRestartPlugin @Inject constructor(
 
         // ── infrastructure adapters ──────────────────────────────────────
         val clock = SystemClockAdapter()
+        val freshCompanionIdentity: (ServerId) -> UUID? = { target ->
+            companionRegistry.compatibleHeartbeat(
+                target,
+                clock.now(),
+                Duration.ofSeconds(cfgSnapshot().controlSecurity.heartbeatTimeoutSeconds),
+            )?.bootId
+        }
         val audience: AudiencePort = AdventureAudienceAdapter(proxy)
         val proxyBackend = VelocityProxyServerBackend(proxy, logger)
         val proxyPort: ProxyPort = ProxyAdapter(proxyBackend)
@@ -114,7 +130,13 @@ class QueueRestartPlugin @Inject constructor(
         val forwardingTransport = PluginMessageTransport { target, payload ->
             channelTransport.send(target, payload)
         }
-        val pluginMessageAdapter = PluginMessageAdapter(forwardingTransport)
+        val pluginMessageAdapter = PluginMessageAdapter(
+            forwardingTransport,
+            AuthenticatedMessageCodec(
+                controlSecret,
+                maxClockSkewSeconds = cfgSnapshot().controlSecurity.maximumClockSkewSeconds,
+            ),
+        )
         channelTransport = VelocityChannelTransport(proxy, pluginMessageAdapter)
         val messaging: MessagingPort = pluginMessageAdapter
         proxy.channelRegistrar.register(channelTransport.channelIdentifier)
@@ -123,9 +145,16 @@ class QueueRestartPlugin @Inject constructor(
         // ── domain wiring ────────────────────────────────────────────────
         val rankLadder = RankLadder(cfgSnapshot().rankLadder, cfgSnapshot().rankDefault)
         val coordinatorRegistry = CoordinatorRegistry()
+        lateinit var networkService: NetworkRestartService
         proxy.eventManager.register(
             this,
-            BackendAccessGuard(proxy, coordinatorRegistry, cfgSnapshot, hubResolver),
+            BackendAccessGuard(
+                proxy,
+                coordinatorRegistry,
+                cfgSnapshot,
+                hubResolver,
+                additionalBlocked = { target -> networkService.blocksBackendAccess(target) },
+            ),
         )
         val countdownBroadcaster = CountdownBroadcaster(
             audience = audience,
@@ -150,13 +179,21 @@ class QueueRestartPlugin @Inject constructor(
         )
         val drainPlanner = DrainPlanner()
         val checkGate = CheckGate(
-            timeoutSeconds = cfgSnapshot().rejoin.checkGateTimeoutSeconds,
-            releaseOnTimeout = cfgSnapshot().rejoin.releaseOnTimeout,
+            timeoutSeconds = { cfgSnapshot().rejoin.checkGateTimeoutSeconds },
+            releaseOnTimeout = { cfgSnapshot().rejoin.releaseOnTimeout },
         )
-        val rejoinService = RejoinService(proxyPort, queuePort, rankLadder, checkGate)
+        val rejoinService = RejoinService(
+            proxyPort,
+            queuePort,
+            { RankLadder(cfgSnapshot().rankLadder, cfgSnapshot().rankDefault) },
+            checkGate,
+        )
 
         // REQ-022. Pending arms published here are pulled by the
         // companion's ProxyArmPoller via the ProxyPingArmResponder below.
+        // Intentionally process-local. If Velocity dies after a destructive
+        // delivery may have been published, the durable plan enters review;
+        // replaying an orphaned arm after startup would be unsafe.
         val pendingArmStore = PendingArmStore()
         val backendOptions = BackendRestartOptions()
 
@@ -176,28 +213,45 @@ class QueueRestartPlugin @Inject constructor(
             restartArg = "",
             pendingArmStore = pendingArmStore,
             options = backendOptions,
+            companionIdentity = freshCompanionIdentity,
+            onRestartPublished = { target, baseline ->
+                networkService.markBackendHandoffPublished(target, baseline)
+            },
         )
         orchestrator.start()
 
-        proxy.eventManager.register(this, ProxyPingArmResponder(pendingArmStore, clock, logger))
-
-        val pingPoller = PingPoller(
-            registry = coordinatorRegistry,
-            proxy = proxyPort,
-            onReady = orchestrator::finishRejoin,
-            pingPollSeconds = cfgSnapshot().rejoin.pingPollSeconds,
+        val pollProtocol = AuthenticatedPollProtocol(
+            controlSecret,
+            maxClockSkewSeconds = cfgSnapshot().controlSecurity.maximumClockSkewSeconds,
+        )
+        proxy.eventManager.register(
+            this,
+            ProxyPingArmResponder(
+                pendingArmStore,
+                clock,
+                logger,
+                pollProtocol,
+                companionRegistry,
+                allowedServers = { cfgSnapshot().networkRestart.serverIds.keys },
+            ),
         )
 
         val schedRestartHandler = SchedRestartCommandHandler(
             registry = coordinatorRegistry,
             hubServer = cfgSnapshot().hubServer,
-            companionPresent = ::companionPresentFor,
+            companionPresent = { target ->
+                companionRegistry.isCompatible(
+                    target,
+                    clock.now(),
+                    Duration.ofSeconds(cfgSnapshot().controlSecurity.heartbeatTimeoutSeconds),
+                )
+            },
             cohortFor = { target -> cohortFromCurrentRoster(target, proxyPort) },
             options = backendOptions,
             cancelCoordinator = orchestrator::cancel,
         )
         val networkExecutor = ConfiguredRestartExecutor { cfgSnapshot().networkRestart }
-        val networkService = NetworkRestartService(
+        networkService = NetworkRestartService(
             config = { cfgSnapshot().networkRestart },
             schedules = { cfgSnapshot().schedules },
             executor = networkExecutor,
@@ -208,10 +262,27 @@ class QueueRestartPlugin @Inject constructor(
             audit = { plan, event -> logger.info("network restart plan {}: {}", plan.id, event) },
             serverCancellationOwner = { target, silent -> orchestrator.cancelPlan(target, silent) },
             soundResolver = { seconds -> CountdownSoundPolicy.resolve(cfgSnapshot().sounds, seconds) },
+            backendIdentity = freshCompanionIdentity,
+            prepareBackendHandoff = orchestrator::prepareRestartHandoff,
+            currentProxyBootId = proxyBootId,
+            executionTimeout = { Duration.ofSeconds(cfgSnapshot().controlSecurity.backendExecutionTimeoutSeconds) },
+            serverReviewResolver = { target -> orchestrator.resolveAfterManualReview(target) },
+        )
+        val pingPoller = PingPoller(
+            registry = coordinatorRegistry,
+            companions = companionRegistry,
+            onReady = orchestrator::finishRejoin,
+            heartbeatTimeout = { Duration.ofSeconds(cfgSnapshot().controlSecurity.heartbeatTimeoutSeconds) },
+            executionTimeout = { Duration.ofSeconds(cfgSnapshot().controlSecurity.backendExecutionTimeoutSeconds) },
+            onTimeout = { target, reason ->
+                logger.error("queue-restart: restart observation timed out for {}: {}", target.value, reason)
+                networkService.markBackendNeedsReview(target, reason)
+            },
         )
         val adminHandler = QRestartAdminCommandHandler(
             config = config,
             triggerSchedule = { name -> runCatching { networkService.triggerConfiguredSchedule(name) != null }.getOrDefault(false) },
+            resolveReview = networkService::resolveReview,
             onReload = {
                 // REQ-090 (#6). Refresh the permission probe set so the
                 // rank-ladder additions in the freshly parsed config
@@ -231,10 +302,12 @@ class QueueRestartPlugin @Inject constructor(
         proxy.scheduler.buildTask(this, Runnable {
             val now = clock.now()
             try {
+                // Durable plan authority prepares and persists T-0 state before
+                // the orchestrator is allowed to publish a destructive delivery.
+                networkService.tick(now)
                 orchestrator.tick(now)
                 pingPoller.tick(now)
                 rejoinService.tick(now.epochSecond)
-                networkService.tick(now)
             } catch (t: Throwable) {
                 logger.warn("queue-restart tick error", t)
             }
@@ -247,10 +320,6 @@ class QueueRestartPlugin @Inject constructor(
         )
     }
 
-    /** REQ-062. Best-effort companion presence: target reachable. A future
-     *  enhancement could rely on a per-server hello frame on the channel. */
-    private fun companionPresentFor(target: ServerId): Boolean =
-        proxy.getServer(target.value).isPresent
 
     /** REQ-030. Snapshot the live roster of [target] into a [Cohort]. */
     private fun cohortFromCurrentRoster(target: ServerId, proxyPort: ProxyPort): Cohort =

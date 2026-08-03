@@ -16,7 +16,7 @@ rejoin:
   enqueue-on-server-up: true
   release-on-checkhacks-cleared: true
   check-gate-timeout-seconds: 60
-  release-on-timeout: true
+  release-on-timeout: false
   ping-poll-seconds: 3
 
 rank-ladder:
@@ -71,6 +71,16 @@ sounds:
 
 # Velocity owns all recurring schedules. The client API key is supplied through
 # the Velocity process environment; never write the key into this file.
+
+# Shared HMAC secret for every Velocity/Paper control path. Set the same
+# environment variable on Velocity and every Paper backend. Startup fails
+# closed when the secret is missing, short, or still a placeholder.
+control-security:
+  secret: ${QUEUE_RESTART_CONTROL_SECRET}
+  heartbeat-timeout-seconds: 20
+  maximum-clock-skew-seconds: 45
+  backend-execution-timeout-seconds: 600
+
 network-restart:
   enabled: false
   timezone: America/Indiana/Indianapolis

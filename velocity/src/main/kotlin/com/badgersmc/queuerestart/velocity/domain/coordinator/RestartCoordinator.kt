@@ -2,6 +2,7 @@ package com.badgersmc.queuerestart.velocity.domain.coordinator
 
 import com.badgersmc.queuerestart.velocity.domain.cohort.Cohort
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
+import java.util.UUID
 
 /** State machine positions per implementation.md §5. */
 enum class RestartState {
@@ -36,6 +37,9 @@ class RestartCoordinator(val serverId: ServerId) {
     var durationSeconds: Int = 0
         private set
 
+    var restartBaselineBootId: UUID? = null
+        private set
+
     @Synchronized
     fun arm(cohort: Cohort, durationSeconds: Int) {
         require(durationSeconds >= 0) { "durationSeconds must be ≥ 0" }
@@ -51,7 +55,14 @@ class RestartCoordinator(val serverId: ServerId) {
 
     fun beginDrain() = transition(from = RestartState.COUNTDOWN, to = RestartState.DRAINING)
 
-    fun restartSent() = transition(from = RestartState.DRAINING, to = RestartState.RESTART_SENT)
+    @Synchronized
+    fun restartSent(baselineBootId: UUID) {
+        check(state == RestartState.DRAINING) {
+            "Illegal transition: expected ${RestartState.DRAINING}, was $state (target ${RestartState.RESTART_SENT})"
+        }
+        restartBaselineBootId = baselineBootId
+        state = RestartState.RESTART_SENT
+    }
 
     fun serverDown() = transition(from = RestartState.RESTART_SENT, to = RestartState.SERVER_DOWN)
 
@@ -64,6 +75,7 @@ class RestartCoordinator(val serverId: ServerId) {
         }
         cohort = null
         durationSeconds = 0
+        restartBaselineBootId = null
         state = RestartState.IDLE
     }
 
@@ -75,6 +87,16 @@ class RestartCoordinator(val serverId: ServerId) {
         }
         cohort = null
         durationSeconds = 0
+        restartBaselineBootId = null
+        state = RestartState.IDLE
+    }
+
+    /** Operator-only recovery after manually reconciling an uncertain restart. */
+    @Synchronized
+    fun forceResetAfterReview() {
+        cohort = null
+        durationSeconds = 0
+        restartBaselineBootId = null
         state = RestartState.IDLE
     }
 

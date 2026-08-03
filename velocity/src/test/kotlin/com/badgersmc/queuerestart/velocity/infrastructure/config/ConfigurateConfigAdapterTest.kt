@@ -51,8 +51,13 @@ class ConfigurateConfigAdapterTest {
           drain-disconnect: "<red><server> disconnected"
           network-maintenance: "<red>network maintenance"
         sounds:
-          warn:  { key: block.note_block.bell, volume: 0.4, pitch: 1.0 }
-          tick:  { key: ui.button.click,       volume: 0.7, pitch: 1.0 }
+          warn:  { key: minecraft:block.note_block.bell, volume: 0.4, pitch: 1.0 }
+          tick:  { key: minecraft:ui.button.click,       volume: 0.7, pitch: 1.0 }
+        control-security:
+          secret: 0123456789abcdef0123456789abcdef
+          heartbeat-timeout-seconds: 20
+          maximum-clock-skew-seconds: 45
+          backend-execution-timeout-seconds: 600
         schedules:
           nightly:
             server: survival
@@ -166,6 +171,25 @@ class ConfigurateConfigAdapterTest {
     }
 
     @Test
+    fun `short control secret is rejected before services start`(@TempDir dir: Path) {
+        val bad = canonical.replace(
+            "secret: 0123456789abcdef0123456789abcdef",
+            "secret: too-short",
+        )
+        assertThatThrownBy { ConfigurateConfigAdapter(yaml(dir, bad), warner = {}).snapshot() }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("control secret")
+    }
+
+    @Test
+    fun `root message validation rejects NUL content`(@TempDir dir: Path) {
+        val bad = canonical.replace("<gold>warning", "<gold>bad\u0000message")
+        assertThatThrownBy { ConfigurateConfigAdapter(yaml(dir, bad), warner = {}).snapshot() }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("NUL")
+    }
+
+    @Test
     fun `reload reparses the file`(@TempDir dir: Path) {
         val file = yaml(dir, canonical)
         val adapter = ConfigurateConfigAdapter(file, warner = {})
@@ -224,13 +248,13 @@ class ConfigurateConfigAdapterTest {
             file,
             canonical
                 .replace("message: \"<gold>warning\"", "message: \"<aqua>reloaded\"")
-                .replace("key: ui.button.click", "key: block.note_block.pling"),
+                .replace("key: minecraft:ui.button.click", "key: minecraft:block.note_block.pling"),
         )
         adapter.reload()
         broadcaster.tick(target, 5)
 
         assertThat(audience.messages).containsExactly("<gold>warning", "<aqua>reloaded")
-        assertThat(audience.sounds.map { it.key }).containsExactly("ui.button.click", "block.note_block.pling")
+        assertThat(audience.sounds.map { it.key }).containsExactly("minecraft:ui.button.click", "minecraft:block.note_block.pling")
     }
 
     @Test
@@ -243,7 +267,7 @@ class ConfigurateConfigAdapterTest {
             .isInstanceOf(IllegalArgumentException::class.java)
 
         assertThat(adapter.snapshot().countdown.message).isEqualTo("<gold>warning")
-        assertThat(adapter.snapshot().sounds["tick"]!!.key).isEqualTo("ui.button.click")
+        assertThat(adapter.snapshot().sounds["tick"]!!.key).isEqualTo("minecraft:ui.button.click")
     }
 
 }

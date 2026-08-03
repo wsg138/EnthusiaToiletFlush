@@ -126,8 +126,8 @@ class SchedRestartCommand(
                     .executes { ctx ->
                         val minutes = IntegerArgumentType.getInteger(ctx, "minutes")
                         val target = resolveTarget(ctx, explicit = null) ?: return@executes 0
-                        renderResult(ctx, handler.arm(target, minutes))
-                        1
+                        val now = Instant.now()
+                        create(ctx, PlanType.SERVER, setOf(target), now.plus(Duration.ofMinutes(minutes.toLong())), now, false, "")
                     }
                     .then(
                         configuredServerArgument("server")
@@ -135,8 +135,8 @@ class SchedRestartCommand(
                                 val minutes = IntegerArgumentType.getInteger(ctx, "minutes")
                                 val target = resolveTarget(ctx, explicit = StringArgumentType.getString(ctx, "server"))
                                     ?: return@executes 0
-                                renderResult(ctx, handler.arm(target, minutes))
-                                1
+                                val now = Instant.now()
+                                create(ctx, PlanType.SERVER, setOf(target), now.plus(Duration.ofMinutes(minutes.toLong())), now, false, "")
                             },
                     ),
             )

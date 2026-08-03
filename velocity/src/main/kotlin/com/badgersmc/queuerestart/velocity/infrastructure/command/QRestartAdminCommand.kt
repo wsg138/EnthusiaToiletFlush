@@ -16,6 +16,7 @@ import com.velocitypowered.api.command.CommandSource
  * ```
  *  /qrestart reload
  *  /qrestart trigger <name>
+ *  /qrestart resolve <planIdPrefix>
  * ```
  */
 class QRestartAdminCommand(
@@ -30,7 +31,7 @@ class QRestartAdminCommand(
         val root = BrigadierCommand.literalArgumentBuilder(LITERAL)
             .requires { it.hasPermission(PERMISSION) }
             .executes { ctx ->
-                send(ctx, "<red>Usage: /$LITERAL reload | trigger <scheduleName>")
+                send(ctx, "<red>Usage: /$LITERAL reload | trigger <scheduleName> | resolve <planIdPrefix>")
                 0
             }
             .then(
@@ -59,6 +60,23 @@ class QRestartAdminCommand(
                     },
             )
 
+            .then(
+                BrigadierCommand.literalArgumentBuilder("resolve")
+                    .then(
+                        BrigadierCommand.requiredArgumentBuilder<String>(
+                            "plan",
+                            StringArgumentType.word(),
+                        ).executes { ctx ->
+                            renderResult(ctx, handler.resolve(StringArgumentType.getString(ctx, "plan")))
+                            1
+                        },
+                    )
+                    .executes { ctx ->
+                        send(ctx, "<red>Usage: /$LITERAL resolve <planIdPrefix>")
+                        0
+                    },
+            )
+
         val node: LiteralCommandNode<CommandSource> = root.build()
         return BrigadierCommand(node)
     }
@@ -69,6 +87,8 @@ class QRestartAdminCommand(
                 send(ctx, "<green>Config + cron reloaded. In-flight countdowns preserved.")
             is AdminCommandResult.Triggered ->
                 send(ctx, "<green>Triggered schedule <white>${result.schedule}<green>.")
+            is AdminCommandResult.Resolved ->
+                send(ctx, "<yellow>Resolved NEEDS_REVIEW plan <white>${result.plan}</white>. Verify the network manually before reopening access.</yellow>")
             is AdminCommandResult.Rejected ->
                 send(ctx, "<red>Rejected: ${result.reason}")
         }

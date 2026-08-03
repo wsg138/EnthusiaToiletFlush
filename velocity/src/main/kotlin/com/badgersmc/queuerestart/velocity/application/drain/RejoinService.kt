@@ -29,9 +29,11 @@ import java.util.concurrent.ConcurrentHashMap
 class RejoinService(
     private val proxy: ProxyPort,
     private val queue: QueuePort,
-    private val rankLadder: RankLadder,
+    private val rankLadder: () -> RankLadder,
     private val gate: CheckGate,
 ) {
+    constructor(proxy: ProxyPort, queue: QueuePort, rankLadder: RankLadder, gate: CheckGate) :
+        this(proxy, queue, { rankLadder }, gate)
 
     private data class Pending(val target: ServerId, val weight: Int)
 
@@ -43,7 +45,7 @@ class RejoinService(
             val pid = member.playerId
             if (!proxy.isOnline(pid)) continue
             val perms = proxy.permissionsOf(pid)
-            val weight = rankLadder.resolve(perms)
+            val weight = rankLadder().resolve(perms)
             val hasBypass = "queuerestart.bypass.checkhacks" in perms
             val outcome = gate.register(pid, hasBypass, nowSeconds)
             when (outcome) {

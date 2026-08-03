@@ -27,6 +27,7 @@ class BackendAccessGuard(
     private val registry: CoordinatorRegistry,
     private val config: () -> QueueRestartConfig,
     private val hubResolver: HubResolver,
+    private val additionalBlocked: (ServerId) -> Boolean = { false },
     private val renderer: MiniMessageRenderer = MiniMessageRenderer(),
 ) {
     @Subscribe(order = PostOrder.LAST)
@@ -78,7 +79,7 @@ class BackendAccessGuard(
     }
 
     private fun restartBlocksConnections(serverId: ServerId): Boolean =
-        registry.all()[serverId]?.state in BLOCKED_STATES
+        registry.all()[serverId]?.state in BLOCKED_STATES || additionalBlocked(serverId)
 
     private fun resolveHub(excluding: RegisteredServer): RegisteredServer? {
         val cfg = config()
