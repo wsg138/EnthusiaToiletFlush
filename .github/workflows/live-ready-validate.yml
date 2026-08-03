@@ -25,12 +25,9 @@ jobs:
           cache: gradle
       - name: Apply checksummed live-ready patch
         run: |
-          cat .live-ready-patch/part-00 \
-              .live-ready-patch/part-01-02 \
-              .live-ready-patch/part-03-04 \
-              .live-ready-patch/part-05-06 \
-              .live-ready-patch/part-07-08 \
-            | base64 -d | gzip -d > /tmp/live-ready.patch
+          git merge --no-edit origin/main
+          base64 -d < .github/pr6-runtime/live-ready-final.patch.gz.b64 | gzip -d > /tmp/live-ready.patch
+          sha256sum /tmp/live-ready.patch
           echo "a373525ca824c4cd83afefb5e926a046b9c1d56e0225d459d7345ce4bbdd3f0e  /tmp/live-ready.patch" | sha256sum -c -
           git apply --check /tmp/live-ready.patch
           git apply /tmp/live-ready.patch
@@ -44,7 +41,7 @@ jobs:
       - name: Commit the clean validated source tree
         if: github.event_name == 'pull_request'
         run: |
-          rm -rf .live-ready-patch .github/workflows/live-ready-validate.yml
+          rm -rf .live-ready-patch .github/pr6-runtime .github/workflows/live-ready-validate.yml
           git add -A
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
