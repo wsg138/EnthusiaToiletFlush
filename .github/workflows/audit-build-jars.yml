@@ -1,9 +1,9 @@
 name: audit-build-jars
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/audit-build-30ca316
+      - main
 
 permissions:
   contents: read
