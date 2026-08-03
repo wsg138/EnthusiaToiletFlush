@@ -1,2 +1,2 @@
 This temporary fork-only marker exists only to expose the atomic live-readiness workflow run to the connected GitHub tooling.
-Exact candidate source export trigger.
+Second live-readiness follow-up validation trigger.
