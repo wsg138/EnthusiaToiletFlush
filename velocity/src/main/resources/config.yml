@@ -72,11 +72,12 @@ sounds:
 # Velocity owns all recurring schedules. The client API key is supplied through
 # the Velocity process environment; never write the key into this file.
 
-# Shared HMAC secret for every Velocity/Paper control path. Set the same
-# environment variable on Velocity and every Paper backend. Startup fails
-# closed when the secret is missing, short, or still a placeholder.
+# Shared HMAC secret for every Velocity/Paper control path. Either set the
+# same QUEUE_RESTART_CONTROL_SECRET environment variable on every process, or
+# replace this placeholder with the same quoted 32-256 byte random value in
+# Velocity and every Paper config. A coordinated full restart is required.
 control-security:
-  secret: ${QUEUE_RESTART_CONTROL_SECRET}
+  secret: "${QUEUE_RESTART_CONTROL_SECRET}"
   heartbeat-timeout-seconds: 20
   maximum-clock-skew-seconds: 45
   backend-execution-timeout-seconds: 600

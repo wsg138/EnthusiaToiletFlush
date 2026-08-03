@@ -57,9 +57,21 @@ class ControlSecurityTest {
     }
 
     @Test
+    fun `missing control secret names both configuration locations`() {
+        assertThatThrownBy { ControlAuthenticator.validateSecret("") }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("control secret is not configured")
+            .hasMessageContaining("plugins/queue-restart/config.yml")
+            .hasMessageContaining("plugins/EnthusiaToiletFlush/config.yml")
+            .hasMessageContaining("QUEUE_RESTART_CONTROL_SECRET")
+    }
+
+    @Test
     fun `short and placeholder secrets fail closed`() {
         assertThatThrownBy { ControlAuthenticator.validateSecret("short") }
             .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("too short")
+            .hasMessageContaining("same 32-256 UTF-8 byte random value")
         assertThatThrownBy { ControlAuthenticator.validateSecret("CHANGE_ME_012345678901234567890123456789") }
             .isInstanceOf(IllegalArgumentException::class.java)
     }

@@ -80,12 +80,23 @@ class ControlAuthenticator(secret: String) {
 
     companion object {
         const val MIN_SECRET_BYTES = 32
+        private const val MAX_SECRET_BYTES = 256
         private const val HMAC_ALGORITHM = "HmacSHA256"
+        private const val CONFIGURATION_HINT =
+            "set the same 32-256 UTF-8 byte random value in Velocity plugins/queue-restart/config.yml " +
+                "(control-security.secret) and every Paper plugins/EnthusiaToiletFlush/config.yml " +
+                "(control-secret), or provide QUEUE_RESTART_CONTROL_SECRET to every process"
 
         fun validateSecret(secret: String): ByteArray {
             val bytes = secret.toByteArray(StandardCharsets.UTF_8)
-            require(bytes.size in MIN_SECRET_BYTES..256) {
-                "control secret must be between $MIN_SECRET_BYTES and 256 UTF-8 bytes"
+            require(bytes.isNotEmpty()) {
+                "control secret is not configured; $CONFIGURATION_HINT"
+            }
+            require(bytes.size >= MIN_SECRET_BYTES) {
+                "control secret is too short (${bytes.size} UTF-8 bytes); $CONFIGURATION_HINT"
+            }
+            require(bytes.size <= MAX_SECRET_BYTES) {
+                "control secret is too long (${bytes.size} UTF-8 bytes); maximum is $MAX_SECRET_BYTES"
             }
             require(secret == secret.trim()) { "control secret must not start or end with whitespace" }
             require(!secret.contains("CHANGE_ME", ignoreCase = true)) { "control secret is still a placeholder" }
