@@ -32,3 +32,12 @@ jobs:
           ./gradlew clean :velocity:shadowJar :paper-companion:shadowJar --no-daemon -PreleaseVersion=9.8.7
           unzip -p velocity/build/libs/velocity-9.8.7.jar velocity-plugin.json | grep -F '"version": "9.8.7"'
           unzip -p paper-companion/build/libs/paper-companion-9.8.7.jar plugin.yml | grep -F 'version: 9.8.7'
+      - name: Upload reviewed release jars
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-jars-${{ github.sha }}
+          path: |
+            velocity/build/libs/velocity-9.8.7.jar
+            paper-companion/build/libs/paper-companion-9.8.7.jar
+          if-no-files-found: error
+          retention-days: 14

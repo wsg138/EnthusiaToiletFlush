@@ -80,7 +80,8 @@ class RestartExecutor(
             // a cancellable pending shutdown after the callback cleared it.
             pending = if (completedSynchronously) null else handle
         } catch (error: Throwable) {
-            processedDeliveries.remove(deliveryId)
+            runCatching { processedDeliveries.remove(deliveryId) }
+                .onFailure(error::addSuppressed)
             throw error
         }
         return true

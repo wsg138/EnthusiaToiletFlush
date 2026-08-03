@@ -7,6 +7,8 @@ import com.mojang.brigadier.context.CommandContext
 import com.mojang.brigadier.tree.LiteralCommandNode
 import com.velocitypowered.api.command.BrigadierCommand
 import com.velocitypowered.api.command.CommandSource
+import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.format.NamedTextColor
 
 /**
  * Brigadier shim for `/qrestart`. Permission-gated on
@@ -59,7 +61,6 @@ class QRestartAdminCommand(
                         0
                     },
             )
-
             .then(
                 BrigadierCommand.literalArgumentBuilder("resolve")
                     .then(
@@ -86,11 +87,27 @@ class QRestartAdminCommand(
             is AdminCommandResult.Reloaded ->
                 send(ctx, "<green>Config + cron reloaded. In-flight countdowns preserved.")
             is AdminCommandResult.Triggered ->
-                send(ctx, "<green>Triggered schedule <white>${result.schedule}<green>.")
+                ctx.source.sendMessage(
+                    Component.text("Triggered schedule ", NamedTextColor.GREEN)
+                        .append(Component.text(result.schedule, NamedTextColor.WHITE))
+                        .append(Component.text(".", NamedTextColor.GREEN)),
+                )
             is AdminCommandResult.Resolved ->
-                send(ctx, "<yellow>Resolved NEEDS_REVIEW plan <white>${result.plan}</white>. Verify the network manually before reopening access.</yellow>")
+                ctx.source.sendMessage(
+                    Component.text("Resolved NEEDS_REVIEW plan ", NamedTextColor.YELLOW)
+                        .append(Component.text(result.plan, NamedTextColor.WHITE))
+                        .append(
+                            Component.text(
+                                ". Verify the network manually before reopening access.",
+                                NamedTextColor.YELLOW,
+                            ),
+                        ),
+                )
             is AdminCommandResult.Rejected ->
-                send(ctx, "<red>Rejected: ${result.reason}")
+                ctx.source.sendMessage(
+                    Component.text("Rejected: ", NamedTextColor.RED)
+                        .append(Component.text(result.reason, NamedTextColor.WHITE)),
+                )
         }
     }
 

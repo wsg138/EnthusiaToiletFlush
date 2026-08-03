@@ -1,6 +1,8 @@
 package com.badgersmc.queuerestart.common.schedule
 
+import com.badgersmc.queuerestart.common.security.ReplayWindow
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import java.util.UUID
 
@@ -30,6 +32,25 @@ class AuthenticatedPollProtocolTest {
         assertThat(server.decodeRequest(encoded)).isNull()
         assertThat(AuthenticatedPollProtocol(secret, nowSeconds = { 2_000 }).decodeRequest(encoded)).isNull()
         assertThat(AuthenticatedPollProtocol("fedcba9876543210fedcba9876543210", nowSeconds = { 1_000 }).decodeRequest(encoded)).isNull()
+    }
+
+    @Test
+    fun `poll replay window must cover the full accepted clock skew`() {
+        assertThatThrownBy {
+            AuthenticatedPollProtocol(
+                secret,
+                maxClockSkewSeconds = 45,
+                replayWindow = ReplayWindow(ttlSeconds = 89),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("twice the maximum clock skew")
+
+        AuthenticatedPollProtocol(
+            secret,
+            maxClockSkewSeconds = 45,
+            replayWindow = ReplayWindow(ttlSeconds = 90),
+        )
     }
 
     @Test

@@ -74,6 +74,19 @@ class RestartExecutorTest {
     }
 
     @Test
+    fun `cancellation tombstone received before matching arm prevents shutdown`() {
+        val control = FakeControl()
+        val scheduler = CapturingScheduler()
+        val executor = RestartExecutor(control, scheduler)
+        val deliveryId = UUID.randomUUID()
+
+        assertThat(executor.abort(deliveryId)).isFalse()
+        assertThat(executor.execute(deliveryId, RestartMode.SHUTDOWN, "", 60)).isFalse()
+        scheduler.fireAll()
+        assertThat(control.shutdownCalls).isZero()
+    }
+
+    @Test
     fun `processed restart survives executor recreation`(@TempDir temp: Path) {
         val file = temp.resolve("processed.state")
         val id = UUID.randomUUID()
@@ -84,14 +97,20 @@ class RestartExecutorTest {
     }
 
     @Test
-    fun `scheduler failure rolls back idempotency record`() {
+    fun `scheduler failure durably rolls back idempotency record`(@TempDir temp: Path) {
         val id = UUID.randomUUID()
+        val file = temp.resolve("processed.state")
         val failing = RestartScheduler { _, _ -> error("scheduler unavailable") }
-        val processed = ProcessedDeliveryStore()
+        val processed = ProcessedDeliveryStore(file)
         val executor = RestartExecutor(FakeControl(), failing, processed)
         assertThatThrownBy { executor.execute(id, RestartMode.SHUTDOWN, "", 0) }
             .isInstanceOf(IllegalStateException::class.java)
-        assertThat(RestartExecutor(FakeControl(), processedDeliveries = processed).execute(id, RestartMode.SHUTDOWN, "", 0))
-            .isTrue()
+        assertThat(ProcessedDeliveryStore(file).contains(id)).isFalse()
+        assertThat(
+            RestartExecutor(
+                FakeControl(),
+                processedDeliveries = ProcessedDeliveryStore(file),
+            ).execute(id, RestartMode.SHUTDOWN, "", 0),
+        ).isTrue()
     }
 }

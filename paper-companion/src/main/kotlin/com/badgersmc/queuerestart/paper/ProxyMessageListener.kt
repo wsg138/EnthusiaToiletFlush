@@ -29,8 +29,8 @@ class ProxyMessageListener(
         } catch (error: IllegalArgumentException) {
             warnInvalidFrame(error.message ?: "invalid authenticated frame")
             return
-        } catch (error: Throwable) {
-            plugin.logger.log(Level.WARNING, "queue-restart: control frame decode failed", error)
+        } catch (error: Exception) {
+            warnInvalidFrame("decode failed: ${error.javaClass.simpleName}: ${error.message}")
             return
         }
 
@@ -61,14 +61,18 @@ class ProxyMessageListener(
                 }
             }
             is RestartCancelMessage -> {
-                val cancelled = executor.abort(frame.deliveryId)
-                plugin.logger.info(
-                    if (cancelled) {
-                        "queue-restart: accepted RestartCancel ${frame.deliveryId}; pending shutdown aborted"
-                    } else {
-                        "queue-restart: accepted RestartCancel ${frame.deliveryId}; no pending shutdown existed"
-                    },
-                )
+                try {
+                    val cancelled = executor.abort(frame.deliveryId)
+                    plugin.logger.info(
+                        if (cancelled) {
+                            "queue-restart: accepted RestartCancel ${frame.deliveryId}; pending shutdown aborted"
+                        } else {
+                            "queue-restart: accepted RestartCancel ${frame.deliveryId}; no pending shutdown existed"
+                        },
+                    )
+                } catch (error: Throwable) {
+                    plugin.logger.log(Level.SEVERE, "queue-restart: RestartCancel handling failed", error)
+                }
             }
             else -> Unit
         }

@@ -37,6 +37,7 @@ class RestartCoordinator(val serverId: ServerId) {
     var durationSeconds: Int = 0
         private set
 
+    @Volatile
     var restartBaselineBootId: UUID? = null
         private set
 

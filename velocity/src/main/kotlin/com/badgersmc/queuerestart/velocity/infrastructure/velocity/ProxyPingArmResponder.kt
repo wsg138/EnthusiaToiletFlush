@@ -13,6 +13,7 @@ import com.velocitypowered.api.event.Subscribe
 import com.velocitypowered.api.event.proxy.ProxyPingEvent
 import com.velocitypowered.api.proxy.server.ServerPing
 import org.slf4j.Logger
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 
 /** Authenticated heartbeat, ACK, and retryable poll-back delivery endpoint. */
@@ -31,17 +32,17 @@ class ProxyPingArmResponder(
         val rawHost = event.connection.rawVirtualHost.orElse(null) ?: return
         if (!AuthenticatedPollProtocol.looksLikeRequest(rawHost)) return
 
+        val now = clock.now()
         val request = protocol.decodeRequest(rawHost)
         if (request == null) {
-            warnInvalid("signature, timestamp, or replay validation failed")
+            warnInvalid(now, "signature, timestamp, or replay validation failed")
             hideSample(event)
             return
         }
 
-        val now = clock.now()
         val serverId = ServerId(request.serverId)
         if (serverId !in allowedServers()) {
-            warnInvalid("authenticated poll named unconfigured backend '${serverId.value}'")
+            warnInvalid(now, "authenticated poll named unconfigured backend '${serverId.value}'")
             hideSample(event)
             return
         }
@@ -49,13 +50,13 @@ class ProxyPingArmResponder(
         companions.record(serverId, request.bootId, request.capabilities, now)
         val compatible = request.capabilities and CompanionCapabilities.REQUIRED == CompanionCapabilities.REQUIRED
         if (!compatible) {
-            warnInvalid("backend '${serverId.value}' lacks required control capabilities")
+            warnInvalid(now, "backend '${serverId.value}' lacks required control capabilities")
             hideSample(event)
             return
         }
 
         request.acknowledgement?.let { deliveryId ->
-            if (store.acknowledge(serverId, deliveryId, now)) {
+            if (store.acknowledge(serverId, deliveryId, request.bootId, now)) {
                 logger.info("queue-restart: companion {} acknowledged delivery {}", serverId.value, deliveryId)
             }
         }
@@ -99,10 +100,13 @@ class ProxyPingArmResponder(
         event.ping = event.ping.asBuilder().clearSamplePlayers().build()
     }
 
-    private fun warnInvalid(reason: String) {
-        val now = System.currentTimeMillis()
+    private fun warnInvalid(now: Instant, reason: String) {
+        val nowMillis = now.toEpochMilli()
         val allowedAt = nextInvalidWarningAtMillis.get()
-        if (now < allowedAt || !nextInvalidWarningAtMillis.compareAndSet(allowedAt, now + INVALID_WARNING_INTERVAL_MILLIS)) {
+        if (
+            nowMillis < allowedAt ||
+            !nextInvalidWarningAtMillis.compareAndSet(allowedAt, nowMillis + INVALID_WARNING_INTERVAL_MILLIS)
+        ) {
             return
         }
         logger.warn("queue-restart: rejected invalid companion poll: {}", reason)

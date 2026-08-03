@@ -38,6 +38,25 @@ class ControlSecurityTest {
     }
 
     @Test
+    fun `replay window must cover the full accepted clock skew`() {
+        assertThatThrownBy {
+            AuthenticatedMessageCodec(
+                secret,
+                maxClockSkewSeconds = 60,
+                replayWindow = ReplayWindow(ttlSeconds = 119),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("twice the maximum clock skew")
+
+        AuthenticatedMessageCodec(
+            secret,
+            maxClockSkewSeconds = 60,
+            replayWindow = ReplayWindow(ttlSeconds = 120),
+        )
+    }
+
+    @Test
     fun `short and placeholder secrets fail closed`() {
         assertThatThrownBy { ControlAuthenticator.validateSecret("short") }
             .isInstanceOf(IllegalArgumentException::class.java)

@@ -27,7 +27,7 @@ enum class ControlDirection(val code: Byte) {
 
 /** Bounded replay window shared by the authenticated channel and SLP protocol. */
 class ReplayWindow(
-    private val ttlSeconds: Long = 120,
+    val ttlSeconds: Long = 120,
     private val maxEntries: Int = 20_000,
 ) {
     private val seen = ConcurrentHashMap<String, Long>()
@@ -97,7 +97,9 @@ class ControlAuthenticator(secret: String) {
 /**
  * Versioned, timestamped, replay-resistant envelope for qrestart plugin messages.
  * Direction and the logical backend peer are authenticated, preventing reflection
- * or retargeting a valid frame from one backend to another.
+ * and cross-routing by network observers or packet tampering. Deployments that
+ * share one control secret across all backends do not isolate a compromised
+ * backend: a peer holding that secret can authenticate another peer id.
  */
 class AuthenticatedMessageCodec(
     secret: String,
@@ -111,6 +113,9 @@ class AuthenticatedMessageCodec(
 
     init {
         require(maxClockSkewSeconds in 1..300) { "maximum clock skew must be 1..300 seconds" }
+        require(replayWindow.ttlSeconds >= 2 * maxClockSkewSeconds) {
+            "replay window ttl must be at least twice the maximum clock skew"
+        }
     }
 
     fun encode(message: Message, direction: ControlDirection, peerId: String): ByteArray {

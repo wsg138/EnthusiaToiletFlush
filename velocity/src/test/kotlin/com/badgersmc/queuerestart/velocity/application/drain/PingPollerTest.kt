@@ -104,4 +104,23 @@ class PingPollerTest {
         assertThat(registry.get(server).state).isEqualTo(RestartState.SERVER_DOWN)
         assertThat(finished).isEmpty()
     }
+
+    @Test
+    fun `no boot change within execution timeout reports a stuck restart`() {
+        val boot = UUID.randomUUID()
+        val registry = CoordinatorRegistry().also { prime(it, boot) }
+        val companions = CompanionRegistry()
+        val t0 = Instant.parse("2026-01-01T00:00:00Z")
+        companions.record(server, boot, CompanionCapabilities.REQUIRED, t0)
+        val finished = mutableListOf<ServerId>()
+        val timeouts = mutableListOf<String>()
+        val poller = poller(registry, companions, finished, timeouts)
+
+        poller.tick(t0)
+        poller.tick(t0.plusSeconds(61))
+
+        assertThat(timeouts).hasSize(1)
+        assertThat(timeouts.single()).contains("execution timeout")
+        assertThat(finished).isEmpty()
+    }
 }

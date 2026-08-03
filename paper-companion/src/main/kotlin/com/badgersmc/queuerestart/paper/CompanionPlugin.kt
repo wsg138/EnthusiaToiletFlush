@@ -25,6 +25,7 @@ class CompanionPlugin : JavaPlugin() {
     private lateinit var listener: ProxyMessageListener
     private var armPoller: ProxyArmPoller? = null
     private val bridge = CheckHacksBridge()
+    private val processBootId = resolveProcessBootId()
 
     override fun onEnable() {
         saveDefaultConfig()
@@ -78,13 +79,12 @@ class CompanionPlugin : JavaPlugin() {
         require(port in 1..65535) { "queue-restart: proxy-port must be 1..65535" }
         val every = config.getInt("arm-poll-seconds", 5)
         require(every in 1..60) { "queue-restart: arm-poll-seconds must be 1..60" }
-        val bootId = UUID.randomUUID()
         armPoller = ProxyArmPoller(
             plugin = this,
             proxyHost = host,
             proxyPort = port,
             serverId = serverId,
-            bootId = bootId,
+            bootId = processBootId,
             executor = executor,
             protocol = AuthenticatedPollProtocol(secret, maxClockSkewSeconds = maximumClockSkew),
             pollIntervalSeconds = every,
@@ -106,7 +106,6 @@ class CompanionPlugin : JavaPlugin() {
         }
     }
 
-
     private fun resolveServerId(): String {
         val configured = config.getString("server-id").orEmpty().trim()
         require(configured.matches(Regex("[A-Za-z0-9_.-]{1,64}"))) {
@@ -119,7 +118,7 @@ class CompanionPlugin : JavaPlugin() {
     }
 
     private fun resolveControlSecret(): String {
-        val configured = config.getString("control-secret").orEmpty()
+        val configured = config.getString("control-secret").orEmpty().trim()
         val envMatch = Regex("^\\$\\{([A-Z0-9_]+)}$").matchEntire(configured)
         val resolved = if (envMatch == null) configured else System.getenv(envMatch.groupValues[1]).orEmpty()
         // Constructor validation enforces minimum length and rejects placeholders.
@@ -167,4 +166,17 @@ class CompanionPlugin : JavaPlugin() {
     }
 
     private object EmptyListener : Listener
+
+    companion object {
+        private const val PROCESS_BOOT_ID_PROPERTY = "com.badgersmc.queuerestart.paper.processBootId"
+
+        private fun resolveProcessBootId(): UUID = synchronized(System.getProperties()) {
+            val existing = System.getProperty(PROCESS_BOOT_ID_PROPERTY)
+            if (existing == null) {
+                UUID.randomUUID().also { System.setProperty(PROCESS_BOOT_ID_PROPERTY, it.toString()) }
+            } else {
+                UUID.fromString(existing)
+            }
+        }
+    }
 }

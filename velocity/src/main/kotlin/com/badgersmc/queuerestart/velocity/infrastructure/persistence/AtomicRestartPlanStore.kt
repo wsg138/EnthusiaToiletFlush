@@ -5,11 +5,14 @@ import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import com.badgersmc.queuerestart.velocity.domain.plan.PlanState
 import com.badgersmc.queuerestart.velocity.domain.plan.PlanType
 import com.badgersmc.queuerestart.velocity.domain.plan.RestartPlan
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.Base64
 import java.util.UUID
@@ -55,18 +58,30 @@ class AtomicRestartPlanStore(
 
     @Synchronized
     override fun save(plans: Collection<RestartPlan>) {
-        path.parent?.let(Files::createDirectories)
+        val parent = path.parent
+        parent?.let(Files::createDirectories)
         val temporary = path.resolveSibling("${path.fileName}.tmp")
-        Files.writeString(
+        val content = plans.sortedBy { it.id.toString() }
+            .joinToString("\n", postfix = if (plans.isEmpty()) "" else "\n", transform = ::encode)
+        FileChannel.open(
             temporary,
-            plans.sortedBy { it.id.toString() }
-                .joinToString("\n", postfix = if (plans.isEmpty()) "" else "\n", transform = ::encode),
-            StandardCharsets.UTF_8,
-        )
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE,
+        ).use { channel ->
+            val bytes = ByteBuffer.wrap(content.toByteArray(StandardCharsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
         try {
             Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } catch (_: AtomicMoveNotSupportedException) {
             Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING)
+        }
+        if (parent != null) {
+            FileChannel.open(parent, StandardOpenOption.READ).use { channel ->
+                channel.force(true)
+            }
         }
     }
 
@@ -100,7 +115,7 @@ class AtomicRestartPlanStore(
 
     private fun decode(line: String): RestartPlan {
         val p = line.split('|')
-        require(p.size in LEGACY_FIELD_COUNT..CURRENT_FIELD_COUNT) { "invalid restart state record" }
+        require(p.size >= LEGACY_FIELD_COUNT) { "invalid restart state record" }
         return RestartPlan(
             id = UUID.fromString(p[0]),
             type = PlanType.valueOf(p[1]),
@@ -169,13 +184,23 @@ class AtomicRestartPlanStore(
     }
 
     private fun encodeBootMap(values: Map<ServerId, UUID>): String =
-        values.entries.sortedBy { it.key.value }.joinToString(",") { "${it.key.value}=${it.value}" }
+        "v2:" + values.entries.sortedBy { it.key.value }.joinToString(",") {
+            "${b64(it.key.value)}=${b64(it.value.toString())}"
+        }
 
     private fun decodeBootMap(value: String): Map<ServerId, UUID> {
-        val entries = value.split(',').filter(String::isNotBlank).map { entry ->
-            require(entry.count { it == '=' } == 1) { "invalid boot identity entry" }
-            ServerId(entry.substringBefore('=')) to UUID.fromString(entry.substringAfter('='))
-        }
+        val encoded = value.startsWith("v2:")
+        val entries = value.removePrefix("v2:")
+            .split(',')
+            .filter(String::isNotBlank)
+            .map { entry ->
+                require(entry.count { it == '=' } == 1) { "invalid boot identity entry" }
+                if (encoded) {
+                    ServerId(text(entry.substringBefore('='))) to UUID.fromString(text(entry.substringAfter('=')))
+                } else {
+                    ServerId(entry.substringBefore('=')) to UUID.fromString(entry.substringAfter('='))
+                }
+            }
         require(entries.map(Pair<ServerId, UUID>::first).distinct().size == entries.size) {
             "duplicate backend boot identity"
         }
@@ -193,7 +218,6 @@ class AtomicRestartPlanStore(
 
     companion object {
         private const val LEGACY_FIELD_COUNT = 16
-        private const val CURRENT_FIELD_COUNT = 25
         private const val MAX_PLAN_COUNT = 10_000
         private const val MAX_RECORD_CHARS = 256_000
         private const val MAX_STATE_BYTES = 32L * 1024L * 1024L

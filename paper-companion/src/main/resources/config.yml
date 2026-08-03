@@ -20,5 +20,5 @@ arm-poll-seconds: 5
 # Paper backend. Use at least 32 random bytes. Startup fails closed when it is
 # missing, short, whitespace-padded, or a placeholder. Rotating it requires a
 # coordinated restart of Velocity and all companions.
-control-secret: ${QUEUE_RESTART_CONTROL_SECRET}
+control-secret: "${QUEUE_RESTART_CONTROL_SECRET}"
 maximum-clock-skew-seconds: 45

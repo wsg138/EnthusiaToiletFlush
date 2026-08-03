@@ -9,9 +9,13 @@ import net.kyori.adventure.text.format.TextDecoration
 class RestartNoticeRenderer {
     fun notice(notice: RestartNotice): Component {
         if (notice.urgent) {
-            return Component.empty()
+            var urgent = Component.empty()
                 .append(prefix(notice))
                 .append(Component.text(notice.detail, NamedTextColor.RED, TextDecoration.BOLD))
+            if (notice.reason.isNotBlank()) {
+                urgent = urgent.append(Component.text(" (${notice.reason})", NamedTextColor.YELLOW))
+            }
+            return urgent
         }
 
         var output = Component.empty()

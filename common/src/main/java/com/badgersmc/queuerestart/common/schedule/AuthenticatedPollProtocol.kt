@@ -44,6 +44,9 @@ class AuthenticatedPollProtocol(
 
     init {
         require(maxClockSkewSeconds in 1..300) { "maximum clock skew must be 1..300 seconds" }
+        require(replayWindow.ttlSeconds >= 2 * maxClockSkewSeconds) {
+            "replay window ttl must be at least twice the maximum clock skew"
+        }
     }
 
     fun newRequest(

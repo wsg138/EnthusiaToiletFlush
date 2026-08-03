@@ -1,10 +1,13 @@
 package com.badgersmc.queuerestart.paper
 
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.util.LinkedHashSet
 import java.util.UUID
 
@@ -26,7 +29,7 @@ class ProcessedDeliveryStore(
         trim()
         try {
             save()
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             processed.remove(deliveryId)
             throw error
         }
@@ -51,7 +54,7 @@ class ProcessedDeliveryStore(
                     processed += UUID.fromString(line.trim())
                 }
             trim()
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             throw IllegalStateException(
                 "processed delivery state is corrupt; refusing to enable to prevent replayed restarts: $file",
                 error,
@@ -69,17 +72,29 @@ class ProcessedDeliveryStore(
 
     private fun save() {
         val file = path ?: return
-        file.parent?.let(Files::createDirectories)
+        val parent = file.parent
+        parent?.let(Files::createDirectories)
         val temporary = file.resolveSibling("${file.fileName}.tmp")
-        Files.writeString(
+        val body = processed.joinToString("\n", postfix = if (processed.isEmpty()) "" else "\n")
+        FileChannel.open(
             temporary,
-            processed.joinToString("\n", postfix = if (processed.isEmpty()) "" else "\n"),
-            StandardCharsets.UTF_8,
-        )
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE,
+        ).use { channel ->
+            val bytes = ByteBuffer.wrap(body.toByteArray(StandardCharsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
         try {
             Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } catch (_: AtomicMoveNotSupportedException) {
             Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING)
+        }
+        if (parent != null) {
+            FileChannel.open(parent, StandardOpenOption.READ).use { channel ->
+                channel.force(true)
+            }
         }
     }
 }

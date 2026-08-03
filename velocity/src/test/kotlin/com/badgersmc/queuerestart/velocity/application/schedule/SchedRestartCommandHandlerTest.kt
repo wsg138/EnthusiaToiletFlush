@@ -29,9 +29,10 @@ class SchedRestartCommandHandlerTest {
     private fun handler(
         companionOn: Set<ServerId> = setOf(survival, creative),
         cohorts: Map<ServerId, Cohort> = mapOf(survival to cohort("p"), creative to cohort("p")),
+        hubServer: () -> ServerId = { hub },
     ) = SchedRestartCommandHandler(
         registry = CoordinatorRegistry(),
-        hubServer = hub,
+        hubServer = hubServer,
         companionPresent = { it in companionOn },
         cohortFor = { cohorts[it] ?: Cohort(emptySet()) },
     )
@@ -51,6 +52,19 @@ class SchedRestartCommandHandlerTest {
     @Test
     fun `arm hub target is rejected (REQ-060)`() {
         val result = handler().arm(hub, durationMinutes = 5)
+        assertThat(result).isInstanceOf(SchedCommandResult.Rejected::class.java)
+        assertThat((result as SchedCommandResult.Rejected).reason)
+            .containsIgnoringCase("hub")
+    }
+
+    @Test
+    fun `reloaded hub supplier protects the new hub`() {
+        var currentHub = hub
+        val handler = handler(hubServer = { currentHub })
+        currentHub = survival
+
+        val result = handler.arm(survival, durationMinutes = 5)
+
         assertThat(result).isInstanceOf(SchedCommandResult.Rejected::class.java)
         assertThat((result as SchedCommandResult.Rejected).reason)
             .containsIgnoringCase("hub")

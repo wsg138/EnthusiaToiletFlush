@@ -3,11 +3,14 @@ package com.badgersmc.queuerestart.velocity.application.arm
 import com.badgersmc.queuerestart.common.protocol.RestartMode
 import com.badgersmc.queuerestart.common.schedule.PendingArm
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.time.Duration
 import java.time.Instant
 import java.util.Base64
@@ -17,7 +20,8 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Persistent, acknowledged delivery store for the player-independent SLP path.
  * Polling only peeks. A delivery is removed after an authenticated ACK carrying
- * the exact delivery id, so connection loss cannot silently steal an arm.
+ * the exact delivery id and expected backend boot id, so connection loss or a
+ * stale process cannot silently steal an arm.
  */
 class PendingArmStore(
     private val ttl: Duration = Duration.ofMinutes(10),
@@ -106,14 +110,14 @@ class PendingArmStore(
     }
 
     @Synchronized
-    fun acknowledge(serverId: ServerId, deliveryId: UUID, now: Instant): Boolean {
+    fun acknowledge(serverId: ServerId, deliveryId: UUID, bootId: UUID, now: Instant): Boolean {
         val entry = slots[serverId] ?: return false
         if (!now.isBefore(entry.expiresAt)) {
             slots.remove(serverId, entry)
             save()
             return false
         }
-        if (entry.id != deliveryId) return false
+        if (entry.id != deliveryId || entry.expectedBootId != bootId) return false
         val removed = slots.remove(serverId, entry)
         if (removed) save()
         return removed
@@ -162,7 +166,7 @@ class PendingArmStore(
                         "duplicate pending delivery for ${server.value}"
                     }
                 }
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             slots.clear()
             throw IllegalStateException(
                 "pending control delivery state is corrupt; refusing to start to prevent lost or replayed restarts: $path",
@@ -174,7 +178,8 @@ class PendingArmStore(
     @Synchronized
     private fun save() {
         val path = persistencePath ?: return
-        path.parent?.let(Files::createDirectories)
+        val parent = path.parent
+        parent?.let(Files::createDirectories)
         val tmp = path.resolveSibling("${path.fileName}.tmp")
         val content = slots.entries
             .sortedBy { it.key.value }
@@ -197,11 +202,25 @@ class PendingArmStore(
                     )
                 }.joinToString("|")
             }
-        Files.writeString(tmp, content, StandardCharsets.UTF_8)
+        FileChannel.open(
+            tmp,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE,
+        ).use { channel ->
+            val bytes = ByteBuffer.wrap(content.toByteArray(StandardCharsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
         try {
             Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } catch (_: AtomicMoveNotSupportedException) {
             Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING)
+        }
+        if (parent != null) {
+            FileChannel.open(parent, StandardOpenOption.READ).use { channel ->
+                channel.force(true)
+            }
         }
     }
 

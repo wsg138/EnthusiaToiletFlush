@@ -21,7 +21,7 @@ sealed interface SchedCommandResult {
  */
 class SchedRestartCommandHandler(
     private val registry: CoordinatorRegistry,
-    private val hubServer: ServerId,
+    private val hubServer: () -> ServerId,
     private val companionPresent: (ServerId) -> Boolean,
     private val cohortFor: (ServerId) -> Cohort,
     private val options: BackendRestartOptions = BackendRestartOptions(),
@@ -39,7 +39,7 @@ class SchedRestartCommandHandler(
         if (durationSeconds <= 0) {
             return SchedCommandResult.Rejected("duration must be > 0 seconds")
         }
-        if (target == hubServer) {
+        if (target == hubServer()) {
             return SchedCommandResult.Rejected("cannot restart the hub server '${target.value}'")
         }
         if (!companionPresent(target)) {

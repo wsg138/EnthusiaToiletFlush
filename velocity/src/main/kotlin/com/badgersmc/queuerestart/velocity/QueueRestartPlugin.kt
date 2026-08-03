@@ -61,6 +61,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Velocity entrypoint. On `ProxyInitializeEvent`:
@@ -146,6 +147,7 @@ class QueueRestartPlugin @Inject constructor(
         val rankLadder = RankLadder(cfgSnapshot().rankLadder, cfgSnapshot().rankDefault)
         val coordinatorRegistry = CoordinatorRegistry()
         lateinit var networkService: NetworkRestartService
+        val networkServiceReady = AtomicBoolean(false)
         proxy.eventManager.register(
             this,
             BackendAccessGuard(
@@ -153,7 +155,9 @@ class QueueRestartPlugin @Inject constructor(
                 coordinatorRegistry,
                 cfgSnapshot,
                 hubResolver,
-                additionalBlocked = { target -> networkService.blocksBackendAccess(target) },
+                additionalBlocked = { target ->
+                    !networkServiceReady.get() || networkService.blocksBackendAccess(target)
+                },
             ),
         )
         val countdownBroadcaster = CountdownBroadcaster(
@@ -215,7 +219,11 @@ class QueueRestartPlugin @Inject constructor(
             options = backendOptions,
             companionIdentity = freshCompanionIdentity,
             onRestartPublished = { target, baseline ->
-                networkService.markBackendHandoffPublished(target, baseline)
+                if (networkServiceReady.get()) {
+                    networkService.markBackendHandoffPublished(target, baseline)
+                } else {
+                    false
+                }
             },
         )
         orchestrator.start()
@@ -238,7 +246,7 @@ class QueueRestartPlugin @Inject constructor(
 
         val schedRestartHandler = SchedRestartCommandHandler(
             registry = coordinatorRegistry,
-            hubServer = cfgSnapshot().hubServer,
+            hubServer = { cfgSnapshot().hubServer },
             companionPresent = { target ->
                 companionRegistry.isCompatible(
                     target,
@@ -268,6 +276,8 @@ class QueueRestartPlugin @Inject constructor(
             executionTimeout = { Duration.ofSeconds(cfgSnapshot().controlSecurity.backendExecutionTimeoutSeconds) },
             serverReviewResolver = { target -> orchestrator.resolveAfterManualReview(target) },
         )
+        networkServiceReady.set(true)
+
         val pingPoller = PingPoller(
             registry = coordinatorRegistry,
             companions = companionRegistry,
