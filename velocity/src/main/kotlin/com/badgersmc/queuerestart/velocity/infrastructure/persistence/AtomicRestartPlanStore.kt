@@ -48,11 +48,12 @@ class AtomicRestartPlanStore(private val path: Path, private val warning: (Strin
         b64(plan.targetResults.entries.joinToString(",") { "${it.key}=${it.value}" }),
         b64(plan.dispatchedActionKeys.joinToString(",")),
         plan.completedAt?.toString().orEmpty(),
+        plan.dryRun,
     ).joinToString("|")
 
     private fun decode(line: String): RestartPlan {
         val p = line.split('|')
-        require(p.size in 16..18) { "invalid restart state record" }
+        require(p.size in 16..19) { "invalid restart state record" }
         return RestartPlan(
             id = UUID.fromString(p[0]), type = PlanType.valueOf(p[1]),
             targets = text(p[13]).split(',').filter(String::isNotBlank).map(::ServerId).toSet(),
@@ -68,6 +69,7 @@ class AtomicRestartPlanStore(private val path: Path, private val warning: (Strin
             },
             actionStarted = p[10].toBoolean(), maintenanceEnabled = p[11].toBoolean(),
             completedAt = p.getOrNull(17)?.takeIf(String::isNotBlank)?.let(Instant::parse),
+            dryRun = p.getOrNull(18)?.toBoolean() ?: false,
             failure = text(p[12]),
         )
     }

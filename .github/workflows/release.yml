@@ -43,12 +43,12 @@ jobs:
           echo "Latest tag: ${LATEST:-none}, bumping to v$NEXT"
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
 
-      - name: Build shadowJars
+      - name: Test and build shadowJars
         env:
           RELEASE_VERSION: ${{ steps.bump.outputs.version }}
         run: |
           chmod +x ./gradlew
-          ./gradlew shadowJar --no-daemon -PreleaseVersion="$RELEASE_VERSION"
+          ./gradlew check shadowJar --no-daemon -PreleaseVersion="$RELEASE_VERSION"
 
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2

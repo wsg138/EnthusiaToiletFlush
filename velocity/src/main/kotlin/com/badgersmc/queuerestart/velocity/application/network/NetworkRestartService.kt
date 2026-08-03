@@ -100,7 +100,10 @@ class NetworkRestartService(
     /** Most recent completed restart that included the Velocity proxy. */
     fun lastCompletedProxyRestart(): RestartPlan? = plans.values
         .asSequence()
-        .filter { it.state == PlanState.COMPLETED && it.completedAt != null && it.type in setOf(PlanType.PROXY, PlanType.NETWORK) }
+        .filter {
+            it.state == PlanState.COMPLETED && it.completedAt != null &&
+                it.type in setOf(PlanType.PROXY, PlanType.NETWORK) && !it.isDryRunCompletion()
+        }
         .maxByOrNull { it.completedAt!! }
 
     /** Most recent completed restart that included [target]. */
@@ -109,7 +112,8 @@ class NetworkRestartService(
         .filter {
             it.state == PlanState.COMPLETED &&
                 target in it.targets &&
-                it.completedAt != null && it.type in setOf(PlanType.SERVER, PlanType.NETWORK)
+                it.completedAt != null && it.type in setOf(PlanType.SERVER, PlanType.NETWORK) &&
+                !it.isDryRunCompletion()
         }
         .maxByOrNull { it.completedAt!! }
 
@@ -222,37 +226,53 @@ class NetworkRestartService(
         plan.state = PlanState.PREFLIGHT
         save()
         val cfg = config()
+        val executionExecutor = executor.snapshot()
         val ids = when (plan.type) {
             PlanType.PROXY -> listOf(cfg.proxyServerId)
             PlanType.NETWORK -> cfg.members.map { cfg.serverIds.getValue(it) } + cfg.proxyServerId
             PlanType.SERVER -> emptyList()
         }
+        if (!executionExecutor.performsPowerActions) {
+            completeDryRun(plan, cfg, executionExecutor.name)
+            return
+        }
         CompletableFuture.allOf(*ids.map { id ->
-            executor.preflight(id).toCompletableFuture().thenAccept { result ->
+            executionExecutor.preflight(id).toCompletableFuture().thenAccept { result ->
                 if (!result.accepted) throw IllegalStateException(result.detail)
             }
         }.toTypedArray())
             .whenComplete { _, error ->
-                if (error != null) fail(plan, "preflight failed: ${rootMessage(error)}")
-                else if (plan.type == PlanType.PROXY) executeProxy(plan) else executeNetwork(plan)
+                try {
+                    if (error != null) fail(plan, "preflight failed: ${rootMessage(error)}")
+                    else if (plan.type == PlanType.PROXY) executeProxy(plan, cfg, executionExecutor)
+                    else executeNetwork(plan, cfg, executionExecutor)
+                } catch (dispatchError: Exception) {
+                    fail(plan, rootMessage(dispatchError))
+                }
             }
     }
 
-    private fun executeProxy(plan: RestartPlan) {
-        val cfg = config()
+    private fun executeProxy(
+        plan: RestartPlan,
+        cfg: NetworkRestartConfig,
+        executionExecutor: ExternalRestartExecutor,
+    ) {
         enableMaintenance(plan, cfg)
         plan.state = PlanState.DISPATCHING
         save()
         if (!plan.silent) control.broadcast(RestartNotice("NETWORK", "RESTARTING NOW", "The Velocity proxy is restarting.", "All players are being disconnected.", plan.reason))
         control.disconnectAll(RestartNotice("NETWORK", "Network restarting", "The Velocity proxy is restarting.", "Please reconnect shortly.", plan.reason, true))
-        dispatch(plan, "${plan.id}:proxy", cfg.proxyServerId).whenComplete { result, error ->
+        dispatch(plan, "${plan.id}:proxy", cfg.proxyServerId, executionExecutor).whenComplete { result, error ->
             if (error != null || !result.accepted) fail(plan, error?.let(::rootMessage) ?: result.detail)
-            else complete(plan, "proxy", result.detail)
+            else complete(plan, "proxy", result.detail, executionExecutor.name)
         }
     }
 
-    private fun executeNetwork(plan: RestartPlan) {
-        val cfg = config()
+    private fun executeNetwork(
+        plan: RestartPlan,
+        cfg: NetworkRestartConfig,
+        executionExecutor: ExternalRestartExecutor,
+    ) {
         enableMaintenance(plan, cfg)
         plan.state = PlanState.TRANSFERRING
         save()
@@ -262,7 +282,7 @@ class NetworkRestartService(
             .orTimeout(cfg.transferTimeoutSeconds, TimeUnit.SECONDS)
             .thenCompose {
                 plan.state = PlanState.DISPATCHING; save()
-                restartBatch(plan, nonHubs)
+                restartBatch(plan, nonHubs, cfg, executionExecutor)
             }
             .thenCompose {
                 CompletableFuture.runAsync({}, CompletableFuture.delayedExecutor(cfg.backendHeadStartSeconds, TimeUnit.SECONDS))
@@ -270,28 +290,46 @@ class NetworkRestartService(
             .thenCompose {
                 if (!plan.silent) control.broadcast(RestartNotice("NETWORK", "RESTARTING NOW", "The entire network is restarting.", "All players are being disconnected.", plan.reason))
                 control.disconnectAll(RestartNotice("NETWORK", "Full network restart", "The entire Minecraft network is restarting.", "Please reconnect shortly.", plan.reason, true))
-                restartBatch(plan, cfg.hubServers)
+                restartBatch(plan, cfg.hubServers, cfg, executionExecutor)
             }
-            .thenCompose { dispatch(plan, "${plan.id}:proxy", cfg.proxyServerId) }
+            .thenCompose { dispatch(plan, "${plan.id}:proxy", cfg.proxyServerId, executionExecutor) }
             .whenComplete { proxyResult, error ->
                 if (error != null) fail(plan, rootMessage(error))
                 else {
                     plan.targetResults["proxy"] = proxyResult.detail
                     if (plan.targetResults.values.any { it.startsWith("FAILED") } || !proxyResult.accepted) fail(plan, "one or more restart actions failed")
-                    else complete(plan, "network", "all configured actions accepted")
+                    else complete(plan, "network", "all configured actions accepted", executionExecutor.name)
                 }
             }
     }
 
-    private fun restartBatch(plan: RestartPlan, targets: List<ServerId>): CompletionStage<Void> {
-        val cfg = config()
+    private fun restartBatch(
+        plan: RestartPlan,
+        targets: List<ServerId>,
+        cfg: NetworkRestartConfig,
+        executionExecutor: ExternalRestartExecutor,
+    ): CompletionStage<Void> {
         val groups = targets.chunked(cfg.maxConcurrentActions)
         var stage: CompletionStage<Void> = CompletableFuture.completedFuture(null)
         for (group in groups) stage = stage.thenCompose {
-            CompletableFuture.allOf(*group.map { target ->
-                dispatch(plan, "${plan.id}:${target.value}", cfg.serverIds.getValue(target)).toCompletableFuture()
-                    .thenAccept { result -> plan.targetResults[target.value] = if (result.accepted) result.detail else "FAILED: ${result.detail}" }
-            }.toTypedArray()).thenRun(::save)
+            val requests = group.associateWith { target ->
+                dispatch(
+                    plan,
+                    "${plan.id}:${target.value}",
+                    cfg.serverIds.getValue(target),
+                    executionExecutor,
+                ).toCompletableFuture()
+            }
+            CompletableFuture.allOf(*requests.values.toTypedArray()).thenRun {
+                val rejected = mutableListOf<String>()
+                requests.forEach { (target, future) ->
+                    val result = future.join()
+                    plan.targetResults[target.value] = if (result.accepted) result.detail else "FAILED: ${result.detail}"
+                    if (!result.accepted) rejected += "${target.value}: ${result.detail}"
+                }
+                save()
+                check(rejected.isEmpty()) { "restart rejected for ${rejected.joinToString()}" }
+            }
         }
         return stage
     }
@@ -307,21 +345,55 @@ class NetworkRestartService(
         control.setMaintenance(true, Duration.ofSeconds(config().maintenanceFailureExpirySeconds))
     }
 
-    private fun dispatch(plan: RestartPlan, actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+    private fun dispatch(
+        plan: RestartPlan,
+        actionKey: String,
+        panelServerId: String,
+        executionExecutor: ExternalRestartExecutor,
+    ): CompletionStage<PowerActionResult> {
         if (!plan.dispatchedActionKeys.add(actionKey)) {
             return CompletableFuture.completedFuture(PowerActionResult(false, "duplicate action blocked"))
         }
         save()
-        return executor.restart(actionKey, panelServerId)
+        return executionExecutor.restart(actionKey, panelServerId)
     }
 
-    private fun complete(plan: RestartPlan, target: String, detail: String) {
+    private fun completeDryRun(
+        plan: RestartPlan,
+        cfg: NetworkRestartConfig,
+        executorName: String,
+    ) {
+        when (plan.type) {
+            PlanType.PROXY -> plan.targetResults["proxy"] = "dry-run: no power action sent"
+            PlanType.NETWORK -> {
+                cfg.members.forEach { plan.targetResults[it.value] = "dry-run: no power action sent" }
+                plan.targetResults["proxy"] = "dry-run: no power action sent"
+            }
+            PlanType.SERVER -> Unit
+        }
+        plan.dryRun = true
+        plan.completedAt = Instant.now()
+        plan.state = PlanState.COMPLETED
+        plan.maintenanceEnabled = false
+        audit(plan, "completed via $executorName without player disruption")
+        save()
+    }
+
+    private fun complete(
+        plan: RestartPlan,
+        target: String,
+        detail: String,
+        executorName: String,
+    ) {
         plan.targetResults[target] = detail
         plan.completedAt = Instant.now()
         plan.state = PlanState.COMPLETED
-        control.setMaintenance(false, Duration.ZERO)
+        // Keep the login gate active until this process actually exits. The
+        // replacement proxy starts with a fresh control adapter, and if the
+        // accepted panel action does not stop this process the gate expires
+        // naturally after maintenance-failure-expiry-seconds.
         plan.maintenanceEnabled = false
-        audit(plan, "completed via ${executor.name}")
+        audit(plan, "completed via $executorName")
         save()
     }
 
@@ -398,6 +470,8 @@ class NetworkRestartService(
         control.setMaintenance(false, Duration.ZERO)
         save()
     }
+
+    private fun RestartPlan.isDryRunCompletion(): Boolean = dryRun
 
     @Synchronized private fun save() = store.save(plans.values)
     private fun rootMessage(error: Throwable): String = generateSequence(error) { it.cause }.last().message ?: error.javaClass.simpleName

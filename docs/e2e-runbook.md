@@ -44,12 +44,15 @@ restart, exercised against a dev proxy with two backends + a hub.
 1. As op: `/server survival`, then `/schedrestart 1`.
 2. Expect chat: `Server <yellow>survival</yellow> restarts in <yellow>1m</yellow>`
    plus a sound at every configured mark (60s, 30s, 10..1s, T-0).
-3. At T-30s (`drain-lead-seconds`): players begin transferring to `lobby`
-   in batches of 10 (default), spaced 40 ticks apart.
-4. At T-0 the proxy sends `RestartNow` (channel `qrestart:v1`, type 0x10)
-   to `survival`. The companion logs `executing restart: <mode> <arg>` and
-   the backend goes down.
-5. Proxy log: `coordinator(survival): RESTART_SENT`.
+3. Before T-0, confirm nobody is moved from the backend.
+4. At T-0, players begin transferring to `lobby` in batches of 10
+   (default), spaced 40 ticks apart.
+5. Confirm the proxy waits until `survival` reports zero connected players,
+   then publishes an immediate restart arm. The companion shuts down the
+   backend on receipt (the empty-server SLP fallback may add up to one
+   `arm-poll-seconds` interval).
+6. Proxy state advances to `RESTART_SENT` only after the immediate arm is
+   published.
 
 ## 3. Server down → ping ok → rejoin
 
@@ -80,7 +83,7 @@ restart, exercised against a dev proxy with two backends + a hub.
 | Stop the companion on `survival`, then `/schedrestart 5` | rejected — REQ-062 |
 | `/schedrestart cancel` while ARMED | broadcast `restart cancelled` — REQ-005 |
 | `/schedrestart cancel` while IDLE | rejected |
-| Player with `queuerestart.bypass.drain` on `survival` during drain | not transferred — REQ-014 |
+| Player with `queuerestart.bypass.drain` on `survival` during drain | not transferred; receives the configured safety disconnect before restart — REQ-012/014 |
 | Player with `queuerestart.bypass.checkhacks` after restart | released without waiting — REQ-043 |
 | `/qrestart reload` mid-countdown | reload OK, countdown unaffected — REQ-050 |
 | `/qrestart trigger nightly` | arms survival immediately — REQ-051 |
@@ -91,3 +94,12 @@ restart, exercised against a dev proxy with two backends + a hub.
 If any test fails irreversibly, drop the plugin jars from `plugins/`,
 restart the proxy, and `git revert` the failing commit on the project
 branch. The plugin holds no persistent state — config-only.
+
+
+## Whitelist / restart denial messages
+
+1. Start a managed backend countdown and wait until T-0 begins draining.
+2. From the hub, use the normal NPC or GUI to join that backend. Confirm the player remains on the hub and receives `access-messages.backend-restarting`.
+3. After the managed restart completes, whitelist the backend and repeat the NPC/GUI join. Confirm the player remains connected to the proxy and receives `access-messages.backend-whitelisted`.
+4. Test a direct initial connection with no usable hub and confirm the configured message is used as the disconnect reason.
+5. Confirm an unrelated backend kick reason is not replaced.

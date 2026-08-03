@@ -1,9 +1,11 @@
 package com.badgersmc.queuerestart.velocity.infrastructure.velocity
 
+import com.badgersmc.queuerestart.velocity.application.ports.AccessMessagesConfig
 import com.badgersmc.queuerestart.velocity.application.ports.NetworkControlPort
 import com.badgersmc.queuerestart.velocity.application.ports.RestartNotice
 import com.badgersmc.queuerestart.velocity.application.ports.TransferSummary
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
+import com.badgersmc.queuerestart.velocity.infrastructure.audience.MiniMessageRenderer
 import com.velocitypowered.api.event.Subscribe
 import com.velocitypowered.api.event.ResultedEvent
 import com.velocitypowered.api.event.connection.LoginEvent
@@ -18,7 +20,11 @@ import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 
-class VelocityNetworkControl(private val proxy: ProxyServer) : NetworkControlPort {
+class VelocityNetworkControl(
+    private val proxy: ProxyServer,
+    private val accessMessages: () -> AccessMessagesConfig = AccessMessagesConfig::defaults,
+    private val renderer: MiniMessageRenderer = MiniMessageRenderer(),
+) : NetworkControlPort {
     @Volatile private var maintenanceUntil: Instant? = null
 
     override fun broadcast(notice: RestartNotice) {
@@ -34,7 +40,7 @@ class VelocityNetworkControl(private val proxy: ProxyServer) : NetworkControlPor
     override fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary> {
         val players = proxy.getServer(from.value).orElse(null)?.playersConnected?.toList().orEmpty()
         val targets = destinations.mapNotNull { proxy.getServer(it.value).orElse(null) }
-        val work = players.map { player -> move(player, targets) }
+        val work = players.map { player -> move(player, targets, from) }
         return CompletableFuture.allOf(*work.toTypedArray()).thenApply {
             val results = work.map { it.getNow(TransferResult(false, true)) }
             TransferSummary(results.count { it.moved }, results.count { it.disconnected }, results.count { !it.moved && !it.disconnected })
@@ -51,16 +57,23 @@ class VelocityNetworkControl(private val proxy: ProxyServer) : NetworkControlPor
         if (!maintenanceActive()) return
         if (event.player.hasPermission("queuerestart.bypass.maintenance")) return
         event.result = ResultedEvent.ComponentResult.denied(
-            Component.text("Network restart in progress", NamedTextColor.RED)
-                .append(Component.newline())
-                .append(Component.text("Please reconnect shortly.", NamedTextColor.GRAY)),
+            renderer.render(accessMessages().networkMaintenance, emptyMap()),
         )
     }
 
-    private fun move(player: Player, targets: List<RegisteredServer>): CompletableFuture<TransferResult> {
+    private fun move(
+        player: Player,
+        targets: List<RegisteredServer>,
+        source: ServerId,
+    ): CompletableFuture<TransferResult> {
         fun next(index: Int): CompletableFuture<TransferResult> {
             if (index >= targets.size) {
-                player.disconnect(Component.text("Server restarting", NamedTextColor.RED).append(Component.newline()).append(Component.text("Please reconnect shortly.", NamedTextColor.GRAY)))
+                player.disconnect(
+                    renderer.render(
+                        accessMessages().drainDisconnect,
+                        mapOf("server" to source.value),
+                    ),
+                )
                 return CompletableFuture.completedFuture(TransferResult(false, true))
             }
             return player.createConnectionRequest(targets[index]).connect().toCompletableFuture().handle { result, error ->

@@ -58,6 +58,7 @@ class RestartOrchestrator(
         var drainStartedAt: Instant? = null,
         var pendingBatches: ArrayDeque<List<PlayerId>> = ArrayDeque(),
         var nextBatchAt: Instant? = null,
+        var fallbackDisconnectIssued: Boolean = false,
     )
 
     private val state = mutableMapOf<ServerId, TargetState>()
@@ -74,6 +75,7 @@ class RestartOrchestrator(
     }
 
     /** Drive every coordinator forward. Caller supplies wall time. */
+    @Synchronized
     fun tick(now: Instant) {
         val cfg = configSupplier()
         for ((target, coord) in registry.all()) {
@@ -88,6 +90,7 @@ class RestartOrchestrator(
     }
 
     /** REQ-005. Cancels the countdown for [target] and broadcasts the cancel message. */
+    @Synchronized
     fun cancel(target: ServerId, now: Instant = Instant.now()) {
         val coord = registry.all()[target] ?: return
         if (coord.state != RestartState.ARMED && coord.state != RestartState.COUNTDOWN) return
@@ -99,14 +102,11 @@ class RestartOrchestrator(
         }
         options.clear(target)
         state.remove(target)
-        // Publish a tombstone through the player-independent SLP path as
-        // well as plugin messaging. A companion may already have consumed
-        // the arm while no player is available to carry a plugin message.
+        // Clear any stale delivery from an older version or interrupted
+        // attempt. New restarts are not armed on the backend until after T-0
+        // drain completion, so a normal countdown cancellation has no pending
+        // shutdown to abort.
         pendingArmStore.cancel(target, now)
-        // Tell the companion to abort the Bukkit.shutdown() it scheduled
-        // when RestartNow arrived. Without this the proxy-side cancel is
-        // cosmetic and the backend still shuts down on the original
-        // delay.
         messaging.sendRestartCancel(target)
     }
 
@@ -126,21 +126,13 @@ class RestartOrchestrator(
         )
         s.countdownStartedAt = now
         coord.beginCountdown()
-        // Belt + braces delivery: send RestartNow on the plugin-message
-        // channel (REQ-020) AND publish to the SLP poll-back store (REQ-022).
-        // Plugin messages need a player on the target backend; the SLP
-        // path doesn't, so a console-arm with no players still reaches
-        // the companion within one poll interval.
-        messaging.sendRestartNow(target, restartMode, restartArg, delaySeconds = durationSeconds)
-        pendingArmStore.put(
-            target,
-            PendingArm(durationSeconds, restartMode, restartArg),
-            now = now,
-        )
-        // Fire the very first mark immediately if the duration matches a mark
+        // The backend is deliberately NOT armed here. The proxy owns the
+        // countdown, starts draining at T-0, and only sends an immediate
+        // shutdown after every transferable player has left the target.
+        // This prevents players being moved to the hub tens of seconds
+        // before the visible timer reaches zero.
         broadcaster.tick(target, durationSeconds)
-        // If duration ≤ drain-lead (degenerate case), drop straight to drain
-        if (durationSeconds <= cfg.drain.drainLeadSeconds) {
+        if (durationSeconds == 0) {
             coord.beginDrain()
             startDrain(target, cfg, s, now)
         }
@@ -158,7 +150,7 @@ class RestartOrchestrator(
         val elapsed = Duration.between(started, now).seconds.toInt()
         val remaining = (durationSeconds - elapsed).coerceAtLeast(0)
         broadcaster.tick(target, remaining)
-        if (remaining <= cfg.drain.drainLeadSeconds) {
+        if (remaining == 0) {
             coord.beginDrain()
             startDrain(target, cfg, s, now)
         }
@@ -182,22 +174,46 @@ class RestartOrchestrator(
         s.nextBatchAt = now
         // Dispatch first batch immediately so single-tick tests see progress
         dispatchDueBatches(target, cfg, s, now)
-        // If the target is already empty (no players, empty cohort) skip straight to RESTART_SENT
+        // If the target is already empty, dispatch the immediate shutdown now.
         if (proxy.playersOn(target).isEmpty()) {
-            sendRestart(target)
+            sendRestart(target, now)
         }
     }
 
     private fun tickDraining(target: ServerId, cfg: QueueRestartConfig, s: TargetState, now: Instant) {
         dispatchDueBatches(target, cfg, s, now)
 
+        val remaining = proxy.playersOn(target)
+        if (remaining.isEmpty()) {
+            sendRestart(target, now)
+            return
+        }
+
         val started = s.drainStartedAt ?: now
         val elapsed = Duration.between(started, now).seconds
-        val empty = proxy.playersOn(target).isEmpty()
         val timedOut = elapsed >= cfg.drain.forceDrainTimeoutSeconds
-        if (empty || timedOut) {
-            sendRestart(target)
+        val transferSettled = s.pendingBatches.isEmpty() &&
+            s.nextBatchAt?.let { !now.isBefore(it) } == true
+
+        // Once every transfer batch has had one full batch interval to settle,
+        // disconnect only the players who are still stuck on the backend.
+        // This covers a failed hub transfer and drain-bypass holders without
+        // kicking players who are successfully moving between servers.
+        if ((transferSettled || timedOut) && !s.fallbackDisconnectIssued) {
+            remaining.forEach { playerId ->
+                audience.disconnect(
+                    playerId,
+                    cfg.accessMessages.drainDisconnect,
+                    mapOf("server" to target.value, "hub" to cfg.hubServer.value),
+                )
+            }
+            s.fallbackDisconnectIssued = true
         }
+
+        // The regular path waits for Velocity to observe an empty target on
+        // the next tick. The force timeout remains the final safety valve: all
+        // remaining disconnects are issued before the immediate restart arm.
+        if (timedOut) sendRestart(target, now)
     }
 
     private fun dispatchDueBatches(target: ServerId, cfg: QueueRestartConfig, s: TargetState, now: Instant) {
@@ -210,18 +226,25 @@ class RestartOrchestrator(
         }
     }
 
-    private fun sendRestart(target: ServerId) {
+    private fun sendRestart(target: ServerId, now: Instant) {
         val coord = registry.get(target)
         if (coord.state != RestartState.DRAINING) return
-        // RestartNow was already shipped at countdown start (see tickArmed) —
-        // the companion's local timer fires the actual shutdown. Here we just
-        // advance the state machine once draining has finished so the ping
-        // poller starts watching for the server to come back.
+        // Send through both delivery paths only after drain completion. The
+        // plugin-message path is fast when a player is still present; the SLP
+        // poll-back path works when the target is already empty. RestartExecutor
+        // replaces duplicate deliveries, so both are safe and idempotent.
+        messaging.sendRestartNow(target, restartMode, restartArg, delaySeconds = 0)
+        pendingArmStore.put(
+            target,
+            PendingArm(0, restartMode, restartArg),
+            now = now,
+        )
         coord.restartSent()
         state.remove(target)
     }
 
     /** Called by PingPoller after coord.serverUp(). */
+    @Synchronized
     fun finishRejoin(target: ServerId, nowSeconds: Long) {
         val coord = registry.get(target)
         if (coord.state != RestartState.REJOIN_RELEASE) return

@@ -74,7 +74,8 @@ class NetworkRestartServiceTest {
         service.tick(now.plusSeconds(2))
 
         assertThat(events).containsSubsequence("disconnect", "restart:proxy")
-        assertThat(control.maintenanceDisables).isGreaterThanOrEqualTo(2)
+        assertThat(control.maintenanceEnables).isEqualTo(1)
+        assertThat(control.maintenanceDisables).isEqualTo(1)
     }
 
     @Test
@@ -166,6 +167,80 @@ class NetworkRestartServiceTest {
     }
 
     @Test
+    fun `dry run completes without transfers disconnects maintenance or power requests`() {
+        val control = FakeControl()
+        val executor = NonDestructiveExecutor()
+        val service = service(control, executor)
+        val now = Instant.now()
+        val plan = service.createManual(
+            PlanType.NETWORK,
+            setOf(hub, smp),
+            now.plusSeconds(1),
+            now,
+            "validation",
+            "console",
+            false,
+        )
+
+        service.tick(now.plusSeconds(2))
+
+        assertThat(plan.state).isEqualTo(PlanState.COMPLETED)
+        assertThat(control.transfers).isZero()
+        assertThat(control.disconnects).isZero()
+        assertThat(control.maintenanceEnables).isZero()
+        assertThat(executor.calls).isZero()
+        assertThat(service.lastCompletedProxyRestart()).isNull()
+        assertThat(service.lastCompletedServerRestart(smp)).isNull()
+    }
+
+    @Test
+    fun `executor snapshot stays stable when configuration changes during preflight`() {
+        val control = FakeControl()
+        val executor = ReloadDuringPreflightExecutor()
+        val service = service(control, executor)
+        val now = Instant.now()
+        val plan = service.createManual(
+            PlanType.PROXY,
+            emptySet(),
+            now.plusSeconds(1),
+            now,
+            "reload race",
+            "console",
+            false,
+        )
+
+        service.tick(now.plusSeconds(2))
+
+        assertThat(plan.state).isEqualTo(PlanState.COMPLETED)
+        assertThat(executor.realRestartCalls).isEqualTo(1)
+        assertThat(executor.dryRunRestartCalls).isZero()
+    }
+
+    @Test
+    fun `rejected backend restart aborts before hub disconnect and proxy restart`() {
+        val control = FakeControl()
+        val executor = SelectiveExecutor(rejectedPanelId = "smp1234")
+        val service = service(control, executor)
+        val now = Instant.now()
+        val plan = service.createManual(
+            PlanType.NETWORK,
+            setOf(hub, smp),
+            now.plusSeconds(1),
+            now,
+            "failure test",
+            "console",
+            false,
+        )
+
+        service.tick(now.plusSeconds(2))
+
+        assertThat(plan.state).isEqualTo(PlanState.FAILED)
+        assertThat(executor.restartIds).containsExactly("smp1234")
+        assertThat(control.disconnects).isZero()
+        assertThat(plan.failure).contains("SMP").contains("rejected")
+    }
+
+    @Test
     fun `last completed restart queries include proxy network and target history`() {
         val store = MemoryStore()
         val now = Instant.now()
@@ -242,6 +317,68 @@ class NetworkRestartServiceTest {
             CompletableFuture.completedFuture(PowerActionResult(false, "rejected"))
     }
 
+    private class NonDestructiveExecutor : ExternalRestartExecutor {
+        override val name = "DRY_RUN"
+        override val performsPowerActions = false
+        var calls = 0
+        override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> {
+            calls++
+            return CompletableFuture.completedFuture(PowerActionResult(true, "unexpected"))
+        }
+        override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+            calls++
+            return CompletableFuture.completedFuture(PowerActionResult(true, "unexpected"))
+        }
+    }
+
+    private class ReloadDuringPreflightExecutor : ExternalRestartExecutor {
+        var realRestartCalls = 0
+        var dryRunRestartCalls = 0
+
+        private val dryRun = object : ExternalRestartExecutor {
+            override val name = "DRY_RUN"
+            override val performsPowerActions = false
+            override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
+                CompletableFuture.completedFuture(PowerActionResult(true, "dry-run"))
+            override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+                dryRunRestartCalls++
+                return CompletableFuture.completedFuture(PowerActionResult(true, "dry-run"))
+            }
+        }
+
+        private val real = object : ExternalRestartExecutor {
+            override val name = "PTERODACTYL"
+            override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> {
+                current = dryRun
+                return CompletableFuture.completedFuture(PowerActionResult(true, "ok"))
+            }
+            override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+                realRestartCalls++
+                return CompletableFuture.completedFuture(PowerActionResult(true, "ok"))
+            }
+        }
+
+        @Volatile private var current: ExternalRestartExecutor = real
+        override val name: String get() = current.name
+        override val performsPowerActions: Boolean get() = current.performsPowerActions
+        override fun snapshot(): ExternalRestartExecutor = current
+        override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> = current.preflight(panelServerId)
+        override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> =
+            current.restart(actionKey, panelServerId)
+    }
+
+    private class SelectiveExecutor(private val rejectedPanelId: String) : ExternalRestartExecutor {
+        override val name = "selective"
+        val restartIds = mutableListOf<String>()
+        override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
+            CompletableFuture.completedFuture(PowerActionResult(true, "ok"))
+        override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> {
+            restartIds += panelServerId
+            val accepted = panelServerId != rejectedPanelId
+            return CompletableFuture.completedFuture(PowerActionResult(accepted, if (accepted) "ok" else "rejected"))
+        }
+    }
+
     private fun nextDailyWarningStart(): Instant {
         val zone = ZoneId.of("America/Indiana/Indianapolis")
         val now = Instant.now()
@@ -266,10 +403,14 @@ class NetworkRestartServiceTest {
         val broadcasts = mutableListOf<RestartNotice>()
         var maintenanceEnables = 0
         var maintenanceDisables = 0
+        var disconnects = 0
+        var transfers = 0
         override fun broadcast(notice: RestartNotice) { broadcasts += notice }
-        override fun disconnectAll(notice: RestartNotice) { events += "disconnect" }
-        override fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary> =
-            CompletableFuture.completedFuture(TransferSummary(0, 0, 0))
+        override fun disconnectAll(notice: RestartNotice) { disconnects++; events += "disconnect" }
+        override fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary> {
+            transfers++
+            return CompletableFuture.completedFuture(TransferSummary(0, 0, 0))
+        }
         override fun setMaintenance(enabled: Boolean, duration: Duration) {
             if (enabled) maintenanceEnables++
             else maintenanceDisables++

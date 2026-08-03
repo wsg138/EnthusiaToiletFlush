@@ -45,6 +45,11 @@ class ConfigurateConfigAdapterTest {
           message: "<gold>warning"
           message-t0: "<red>now"
           cancel-message: "<green>cancelled"
+        access-messages:
+          backend-restarting: "<red><server> restart"
+          backend-whitelisted: "<yellow><server> whitelist"
+          drain-disconnect: "<red><server> disconnected"
+          network-maintenance: "<red>network maintenance"
         sounds:
           warn:  { key: block.note_block.bell, volume: 0.4, pitch: 1.0 }
           tick:  { key: ui.button.click,       volume: 0.7, pitch: 1.0 }
@@ -97,12 +102,28 @@ class ConfigurateConfigAdapterTest {
         assertThat(cfg.drain.drainOrder).isEqualTo(DrainOrder.PRIORITY_ASC)
         assertThat(cfg.rejoin.checkGateTimeoutSeconds).isEqualTo(60)
         assertThat(cfg.countdown.marksSeconds).containsExactly(60, 30, 10, 5, 1)
+        assertThat(cfg.accessMessages.backendRestarting).contains("<server>").contains("restart")
+        assertThat(cfg.accessMessages.backendWhitelisted).contains("whitelist")
         assertThat(cfg.sounds).containsKey("warn").containsKey("tick")
         assertThat(cfg.sounds["tick"]!!.volume).isEqualTo(0.7f)
         assertThat(cfg.rankLadder["group.owner"]).isEqualTo(1000)
         assertThat(cfg.rankDefault).isEqualTo(0)
         assertThat(cfg.networkRestart.members).containsExactly(ServerId("lobby"), ServerId("survival"))
         assertThat(cfg.schedules.single().name).isEqualTo("nightly")
+    }
+
+    @Test
+    fun `missing access messages use safe defaults`(@TempDir dir: Path) {
+        val withoutMessages = canonical.replace(
+            Regex("(?m)^access-messages:\n(?:  .+\n){4}"),
+            "",
+        )
+
+        val cfg = ConfigurateConfigAdapter(yaml(dir, withoutMessages), warner = {}).snapshot()
+
+        assertThat(cfg.accessMessages.backendRestarting).contains("<server>")
+        assertThat(cfg.accessMessages.backendWhitelisted.lowercase()).contains("whitelist")
+        assertThat(cfg.accessMessages.networkMaintenance).contains("Network restart")
     }
 
     @Test

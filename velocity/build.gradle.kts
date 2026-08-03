@@ -22,11 +22,34 @@ dependencies {
     implementation("org.spongepowered:configurate-yaml:4.1.2")
 
     testImplementation(project(":common"))
+    testImplementation("com.velocityctd:velocity-api:3.5.0-SNAPSHOT")
     testImplementation("com.lemonappdev:konsist:0.17.3")
 }
 
 kotlin {
     jvmToolchain(21)
+}
+
+tasks.processResources {
+    val pluginVersion = project.version.toString()
+    inputs.property("pluginVersion", pluginVersion)
+    filesMatching("velocity-plugin.json") {
+        expand("version" to pluginVersion)
+    }
+}
+
+val verifyPluginMetadata = tasks.register("verifyPluginMetadata") {
+    dependsOn(tasks.processResources)
+    doLast {
+        val metadata = layout.buildDirectory.file("resources/main/velocity-plugin.json").get().asFile.readText()
+        val expected = "\"version\": \"${project.version}\""
+        check(expected in metadata) {
+            "velocity-plugin.json version mismatch: expected $expected"
+        }
+        check("\${version}" !in metadata) {
+            "velocity-plugin.json still contains an unresolved version placeholder"
+        }
+    }
 }
 
 tasks.shadowJar {
@@ -51,4 +74,6 @@ val konsistCheck = tasks.register<Test>("konsistCheck") {
     filter { includeTestsMatching("architecture.LayerRulesTest") }
 }
 
-tasks.named("check") { dependsOn(konsistCheck) }
+tasks.named("check") {
+    dependsOn(konsistCheck, verifyPluginMetadata)
+}

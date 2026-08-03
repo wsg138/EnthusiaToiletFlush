@@ -1,5 +1,6 @@
 package com.badgersmc.queuerestart.velocity.application.ports
 
+import com.badgersmc.queuerestart.velocity.domain.id.PlayerId
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 
 /**
@@ -16,6 +17,9 @@ interface AudiencePort {
      * MiniMessage parsing.
      */
     fun broadcast(target: ServerId, miniMessage: String, placeholders: Map<String, String> = emptyMap())
+
+    /** Disconnect one player with a rendered, configurable reason. */
+    fun disconnect(playerId: PlayerId, miniMessage: String, placeholders: Map<String, String> = emptyMap())
 
     /** Play [cue] for every player currently on [target]. */
     fun playSound(target: ServerId, cue: SoundCue)

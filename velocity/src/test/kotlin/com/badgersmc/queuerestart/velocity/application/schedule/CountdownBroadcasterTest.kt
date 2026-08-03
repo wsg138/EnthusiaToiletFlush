@@ -3,6 +3,7 @@ package com.badgersmc.queuerestart.velocity.application.schedule
 import com.badgersmc.queuerestart.velocity.application.ports.AudiencePort
 import com.badgersmc.queuerestart.velocity.application.ports.SoundCue
 import com.badgersmc.queuerestart.velocity.domain.countdown.CountdownSchedule
+import com.badgersmc.queuerestart.velocity.domain.id.PlayerId
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
@@ -27,6 +28,7 @@ class CountdownBroadcasterTest {
         override fun broadcast(target: ServerId, miniMessage: String, placeholders: Map<String, String>) {
             broadcasts += Broadcast(target, miniMessage, placeholders)
         }
+        override fun disconnect(playerId: PlayerId, miniMessage: String, placeholders: Map<String, String>) = Unit
         override fun playSound(target: ServerId, cue: SoundCue) {
             sounds += Sound(target, cue)
         }

@@ -36,6 +36,7 @@ data class RestartPlan(
     val dispatchedActionKeys: MutableSet<String> = ConcurrentHashMap.newKeySet(),
     var actionStarted: Boolean = false,
     var maintenanceEnabled: Boolean = false,
+    var dryRun: Boolean = false,
     /** Wall-clock time at which this plan's restart action completed. */
     var completedAt: Instant? = null,
     var failure: String = "",

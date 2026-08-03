@@ -2,6 +2,7 @@ package com.badgersmc.queuerestart.velocity.infrastructure.audience
 
 import com.badgersmc.queuerestart.velocity.application.ports.AudiencePort
 import com.badgersmc.queuerestart.velocity.application.ports.SoundCue
+import com.badgersmc.queuerestart.velocity.domain.id.PlayerId
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import com.velocitypowered.api.proxy.Player
 import com.velocitypowered.api.proxy.ProxyServer
@@ -28,6 +29,12 @@ class AdventureAudienceAdapter(
         val players = playersOn(target).toList()
         players.forEach { it.sendMessage(component) }
         logger.debug("broadcast to {} on {}: {}", players.size, target.value, miniMessage)
+    }
+
+    override fun disconnect(playerId: PlayerId, miniMessage: String, placeholders: Map<String, String>) {
+        val player = proxyServer.getPlayer(playerId.uuid).orElse(null) ?: return
+        player.disconnect(renderer.render(miniMessage, placeholders))
+        logger.debug("disconnected {} with queue-restart message", player.username)
     }
 
     override fun playSound(target: ServerId, cue: SoundCue) {

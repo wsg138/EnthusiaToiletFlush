@@ -37,6 +37,7 @@ import com.badgersmc.queuerestart.velocity.infrastructure.messaging.PluginMessag
 import com.badgersmc.queuerestart.velocity.infrastructure.messaging.VelocityChannelTransport
 import com.badgersmc.queuerestart.velocity.infrastructure.executor.ConfiguredRestartExecutor
 import com.badgersmc.queuerestart.velocity.infrastructure.persistence.AtomicRestartPlanStore
+import com.badgersmc.queuerestart.velocity.infrastructure.velocity.BackendAccessGuard
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.ProxyAdapter
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.ProxyPingArmResponder
 import com.badgersmc.queuerestart.velocity.infrastructure.velocity.QueueAdapter
@@ -97,9 +98,13 @@ class QueueRestartPlugin @Inject constructor(
         val audience: AudiencePort = AdventureAudienceAdapter(proxy)
         val proxyBackend = VelocityProxyServerBackend(proxy, logger)
         val proxyPort: ProxyPort = ProxyAdapter(proxyBackend)
+        val hubResolver = HubResolver(proxyPort)
         val queueBackend = VelocityQueueManagerBackend(proxy, logger)
         val queuePort: QueuePort = QueueAdapter(queueBackend)
-        val networkControl = VelocityNetworkControl(proxy)
+        val networkControl = VelocityNetworkControl(
+            proxy = proxy,
+            accessMessages = { cfgSnapshot().accessMessages },
+        )
         proxy.eventManager.register(this, networkControl)
         // Break the adapter↔transport construction cycle with a one-shot
         // forwarding indirection: adapter sends through a lambda that resolves
@@ -117,6 +122,10 @@ class QueueRestartPlugin @Inject constructor(
         // ── domain wiring ────────────────────────────────────────────────
         val rankLadder = RankLadder(cfgSnapshot().rankLadder, cfgSnapshot().rankDefault)
         val coordinatorRegistry = CoordinatorRegistry()
+        proxy.eventManager.register(
+            this,
+            BackendAccessGuard(proxy, coordinatorRegistry, cfgSnapshot, hubResolver),
+        )
         val countdownBroadcaster = CountdownBroadcaster(
             audience = audience,
             messageTemplate = cfgSnapshot().countdown.message,
@@ -134,7 +143,6 @@ class QueueRestartPlugin @Inject constructor(
             },
         )
         val drainPlanner = DrainPlanner()
-        val hubResolver = HubResolver(proxyPort)
         val checkGate = CheckGate(
             timeoutSeconds = cfgSnapshot().rejoin.checkGateTimeoutSeconds,
             releaseOnTimeout = cfgSnapshot().rejoin.releaseOnTimeout,
