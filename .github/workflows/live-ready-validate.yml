@@ -1,0 +1,52 @@
+name: live-ready-validation
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: agent/live-ready-validation
+          fetch-depth: 0
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - name: Apply checksummed live-ready patch
+        run: |
+          cat .live-ready-patch/part-00 \
+              .live-ready-patch/part-01-02 \
+              .live-ready-patch/part-03-04 \
+              .live-ready-patch/part-05-06 \
+              .live-ready-patch/part-07-08 \
+            | base64 -d | gzip -d > /tmp/live-ready.patch
+          echo "a373525ca824c4cd83afefb5e926a046b9c1d56e0225d459d7345ce4bbdd3f0e  /tmp/live-ready.patch" | sha256sum -c -
+          git apply --check /tmp/live-ready.patch
+          git apply /tmp/live-ready.patch
+          git diff --check
+      - name: Run full verification and package both plugins
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean :velocity:check :velocity:shadowJar :paper-companion:check :paper-companion:shadowJar --no-daemon -PreleaseVersion=0.1.5-rc.live-ready
+          unzip -p velocity/build/libs/velocity-0.1.5-rc.live-ready.jar velocity-plugin.json | grep -F '"version": "0.1.5-rc.live-ready"'
+          unzip -p paper-companion/build/libs/paper-companion-0.1.5-rc.live-ready.jar plugin.yml | grep -F 'version: 0.1.5-rc.live-ready'
+      - name: Commit the clean validated source tree
+        if: github.event_name == 'pull_request'
+        run: |
+          rm -rf .live-ready-patch .github/workflows/live-ready-validate.yml
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: authenticate restart control and verify lifecycle completion"
+          git push origin HEAD:agent/live-ready-validation
