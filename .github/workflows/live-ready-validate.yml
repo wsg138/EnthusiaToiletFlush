@@ -25,6 +25,8 @@ jobs:
           cache: gradle
       - name: Apply checksummed live-ready patch
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit origin/main
           base64 -d < .github/pr6-runtime/live-ready-final.patch.gz.b64 | gzip -d > /tmp/live-ready.patch
           sha256sum /tmp/live-ready.patch
@@ -43,7 +45,5 @@ jobs:
         run: |
           rm -rf .live-ready-patch .github/pr6-runtime .github/workflows/live-ready-validate.yml
           git add -A
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "fix: authenticate restart control and verify lifecycle completion"
           git push origin HEAD:agent/live-ready-validation
