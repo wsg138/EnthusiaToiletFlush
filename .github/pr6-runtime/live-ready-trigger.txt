@@ -1,2 +1,2 @@
 This temporary fork-only marker exists only to expose the atomic live-readiness workflow run to the connected GitHub tooling.
-Gradle failure capture trigger.
+Follow-up validation trigger.
