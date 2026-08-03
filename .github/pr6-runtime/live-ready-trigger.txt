@@ -1,2 +1,2 @@
 This temporary fork-only marker exists only to expose the atomic live-readiness workflow run to the connected GitHub tooling.
-Diagnostic retry 3.
+Chunk-slice diagnostic retry.
