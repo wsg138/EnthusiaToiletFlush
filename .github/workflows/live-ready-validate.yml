@@ -30,13 +30,15 @@ jobs:
           echo "aa92935350fe1e1862c0bca143fbb3b074fbedd701af2ad392eea925a5e961b2  .live-ready-patch/part-02" | sha256sum -c -
           echo "92b78dd77263258269be5b85a4ebb0328f673eae0d6fbd5b0f504658e6e1be1b  .live-ready-patch/part-03-04" | sha256sum -c -
           echo "206ded1ba8ba44fe29cc41b17b4cd12a711afaf76081e8ff3612fd5ad9f15259  .live-ready-patch/part-05-06" | sha256sum -c -
-          echo "70a48c47e4c36c1eba55b1f21eb82a2012d437dc73e4a77dfa01da8a03ac435c  .live-ready-patch/part-07-08" | sha256sum -c -
+          echo "f2b01eff7fc8bd7005650147e84961704bb895b48065aa0da857a77935e7b141  .live-ready-patch/part-07" | sha256sum -c -
+          echo "39f69ee67f67a0b951249668d1a6f9d217d0b8f0d3a09280fbf3523a2976b3d4  .live-ready-patch/part-08" | sha256sum -c -
           cat .live-ready-patch/part-00 \
               .live-ready-patch/part-01 \
               .live-ready-patch/part-02 \
               .live-ready-patch/part-03-04 \
               .live-ready-patch/part-05-06 \
-              .live-ready-patch/part-07-08 \
+              .live-ready-patch/part-07 \
+              .live-ready-patch/part-08 \
             | base64 -d | gzip -d > /tmp/live-ready.patch
           echo "a373525ca824c4cd83afefb5e926a046b9c1d56e0225d459d7345ce4bbdd3f0e  /tmp/live-ready.patch" | sha256sum -c -
           git apply --check /tmp/live-ready.patch
