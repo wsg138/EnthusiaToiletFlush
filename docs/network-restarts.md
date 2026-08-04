@@ -82,6 +82,13 @@ already counting down is safely re-armed with only its remaining time, so past
 warning marks are not replayed. Overdue plans are marked missed. Plans
 interrupted during preflight, transfer, or dispatch are marked
 `NEEDS_REVIEW` and are never replayed automatically, preventing restart loops.
+Recovery preserves terminal plans even when their durable `actionStarted`
+history remains true. On the first startup after this fix, records produced by
+the known recovery regression are repaired only when a persisted completion
+timestamp proves completion, or when a proxy/network record has only the
+legacy `actionStarted` flag and none of the dispatch, acceptance, boot-baseline,
+result, or deadline evidence written by a real destructive execution. Ambiguous
+records remain `NEEDS_REVIEW`.
 
 Countdown message templates and sound definitions are resolved at each mark,
 so a successful `/qrestart reload` affects active and future countdowns. A

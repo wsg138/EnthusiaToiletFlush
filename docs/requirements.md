@@ -54,6 +54,7 @@
 - REQ-060: If an operator targets the configured hub server with `/schedrestart`, then the system shall refuse the request and log an error.
 - REQ-061: If two restart requests arrive for the same target server while one is already armed, then the system shall reject the second request and inform the operator.
 - REQ-062: If the companion plugin is missing on the target server when a restart is requested, then the system shall refuse to arm the restart and log an error.
+- REQ-063: During proxy startup recovery, terminal restart plans shall remain terminal regardless of historical `actionStarted` state. The system shall repair legacy `NEEDS_REVIEW` records only when a persisted completion timestamp proves completion, or when a proxy/network record contains the exact legacy failure and has only the historical `actionStarted` flag with no dispatch, acceptance, boot-baseline, result, or deadline evidence. Ambiguous records and server review records shall remain `NEEDS_REVIEW`.
 
 ## Security hardening
 

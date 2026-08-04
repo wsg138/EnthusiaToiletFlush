@@ -835,11 +835,56 @@ class NetworkRestartService(
     private fun conflicts(left: RestartPlan, right: RestartPlan): Boolean =
         if (left.type != PlanType.SERVER || right.type != PlanType.SERVER) true else left.targets.any(right.targets::contains)
 
+    private fun isLegacyRecoveryRegression(plan: RestartPlan): Boolean =
+        plan.type in setOf(PlanType.PROXY, PlanType.NETWORK) &&
+            plan.actionStarted &&
+            plan.failure == LEGACY_INTERRUPTED_FAILURE &&
+            plan.completedAt == null &&
+            plan.executionDeadlineAt == null &&
+            plan.dispatchedActionKeys.isEmpty() &&
+            plan.acceptedActionKeys.isEmpty() &&
+            plan.baselineBootIds.isEmpty() &&
+            plan.proxyBaselineBootId == null &&
+            plan.targetResults.isEmpty()
+
     private fun recover() {
         val now = Instant.now()
         val loaded = store.load()
         for (plan in loaded) {
             when {
+                plan.state in setOf(
+                    PlanState.COMPLETED,
+                    PlanState.CANCELLED,
+                    PlanState.FAILED,
+                    PlanState.MISSED,
+                ) -> {
+                    // actionStarted is durable history, not evidence that a
+                    // terminal plan became active again after proxy startup.
+                    plan.maintenanceEnabled = false
+                    plan.executionDeadlineAt = null
+                }
+                plan.state == PlanState.NEEDS_REVIEW && plan.completedAt != null -> {
+                    // Affected builds could overwrite a verified COMPLETED plan
+                    // solely because actionStarted remained true. completedAt is
+                    // written by the terminal transition, so restore it once.
+                    plan.state = PlanState.COMPLETED
+                    plan.failure = ""
+                    plan.maintenanceEnabled = false
+                    plan.executionDeadlineAt = null
+                    plan.targetResults.putIfAbsent(
+                        "recovery",
+                        "restored completed plan after legacy recovery regression",
+                    )
+                }
+                plan.state == PlanState.NEEDS_REVIEW && isLegacyRecoveryRegression(plan) -> {
+                    // The known regression also produced records with the exact
+                    // legacy failure but none of the durable evidence written by
+                    // a real dispatch path. Close only that impossible state.
+                    plan.state = PlanState.FAILED
+                    plan.failure = "legacy recovery regression reconciled"
+                    plan.maintenanceEnabled = false
+                    plan.executionDeadlineAt = null
+                }
                 plan.state == PlanState.NEEDS_REVIEW -> {
                     plan.maintenanceEnabled = plan.type != PlanType.SERVER
                 }
@@ -854,9 +899,10 @@ class NetworkRestartService(
                     plan.failure = "player transfer was interrupted before any power action"
                     plan.maintenanceEnabled = false
                 }
-                plan.state in setOf(PlanState.PREFLIGHT, PlanState.TRANSFERRING) || plan.actionStarted -> {
+                plan.state in setOf(PlanState.PREFLIGHT, PlanState.TRANSFERRING) ||
+                    (plan.active() && plan.actionStarted) -> {
                     plan.state = PlanState.NEEDS_REVIEW
-                    plan.failure = "execution was interrupted after a destructive action may have started"
+                    plan.failure = LEGACY_INTERRUPTED_FAILURE
                     plan.maintenanceEnabled = plan.type != PlanType.SERVER
                 }
                 plan.active() && !plan.executionAt.isAfter(now) -> {
@@ -938,6 +984,8 @@ class NetworkRestartService(
         generateSequence(error) { it.cause }.last().message ?: error.javaClass.simpleName
 
     companion object {
+        private const val LEGACY_INTERRUPTED_FAILURE =
+            "execution was interrupted after a destructive action may have started"
         private const val MAX_TERMINAL_HISTORY = 500
     }
 }
