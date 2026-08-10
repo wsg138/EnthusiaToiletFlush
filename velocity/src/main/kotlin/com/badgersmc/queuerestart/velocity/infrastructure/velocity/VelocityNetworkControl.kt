@@ -17,8 +17,11 @@ import net.kyori.adventure.key.Key
 import net.kyori.adventure.sound.Sound
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.LockSupport
 
 class VelocityNetworkControl(
     private val proxy: ProxyServer,
@@ -40,7 +43,17 @@ class VelocityNetworkControl(
 
     override fun disconnectAll(notice: RestartNotice) {
         val component = noticeRenderer.disconnect(notice)
-        proxy.allPlayers.forEach { it.disconnect(component) }
+        proxy.allPlayers.toList().forEach { it.disconnect(component) }
+
+        // Player.disconnect() only requests a disconnect. The old implementation
+        // returned immediately, allowing the following Pterodactyl restart to
+        // kill Velocity before the client-side disconnect completed. This method
+        // runs in the asynchronous network-restart dispatch chain, so a short,
+        // bounded settlement barrier is preferable to racing process teardown.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DISCONNECT_SETTLE_SECONDS)
+        while (proxy.allPlayers.isNotEmpty() && System.nanoTime() < deadline) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(DISCONNECT_POLL_MILLIS))
+        }
     }
 
     override fun transferAll(from: ServerId, destinations: List<ServerId>): CompletionStage<TransferSummary> {
@@ -48,12 +61,16 @@ class VelocityNetworkControl(
         val targets = destinations.mapNotNull { proxy.getServer(it.value).orElse(null) }
         val work = players.map { player -> move(player, targets, from) }
         return CompletableFuture.allOf(*work.toTypedArray()).thenApply {
-            val results = work.map { it.getNow(TransferResult(false, true)) }
-            TransferSummary(
+            val results = work.map { it.getNow(TransferResult(false, false)) }
+            val summary = TransferSummary(
                 results.count { it.moved },
                 results.count { it.disconnected },
                 results.count { !it.moved && !it.disconnected },
             )
+            check(summary.failed == 0) {
+                "failed to move or disconnect ${summary.failed} player(s) from ${from.value} before network restart"
+            }
+            summary
         }
     }
 
@@ -79,13 +96,16 @@ class VelocityNetworkControl(
     ): CompletableFuture<TransferResult> {
         fun next(index: Int): CompletableFuture<TransferResult> {
             if (index >= targets.size) {
+                val playerId = player.uniqueId
                 player.disconnect(
                     renderer.render(
                         accessMessages().drainDisconnect,
                         mapOf("server" to source.value),
                     ),
                 )
-                return CompletableFuture.completedFuture(TransferResult(false, true))
+                return awaitPlayerGone(playerId, 0).thenApply { disconnected ->
+                    TransferResult(false, disconnected)
+                }
             }
             return player.createConnectionRequest(targets[index]).connect().toCompletableFuture().handle { result, error ->
                 if (error == null && result.isSuccessful) {
@@ -98,5 +118,24 @@ class VelocityNetworkControl(
         return next(0)
     }
 
+    private fun awaitPlayerGone(playerId: UUID, attempt: Int): CompletableFuture<Boolean> {
+        if (proxy.getPlayer(playerId).isEmpty) {
+            return CompletableFuture.completedFuture(true)
+        }
+        if (attempt >= DISCONNECT_SETTLE_ATTEMPTS) {
+            return CompletableFuture.completedFuture(false)
+        }
+        return CompletableFuture.runAsync(
+            {},
+            CompletableFuture.delayedExecutor(DISCONNECT_POLL_MILLIS, TimeUnit.MILLISECONDS),
+        ).thenCompose { awaitPlayerGone(playerId, attempt + 1) }
+    }
+
     private data class TransferResult(val moved: Boolean, val disconnected: Boolean)
+
+    companion object {
+        private const val DISCONNECT_SETTLE_SECONDS = 5L
+        private const val DISCONNECT_POLL_MILLIS = 50L
+        private const val DISCONNECT_SETTLE_ATTEMPTS = 100
+    }
 }

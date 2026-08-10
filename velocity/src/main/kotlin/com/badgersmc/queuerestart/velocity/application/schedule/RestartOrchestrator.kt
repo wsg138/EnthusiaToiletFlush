@@ -20,6 +20,7 @@ import com.badgersmc.queuerestart.velocity.domain.rank.RankLadder
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -63,6 +64,8 @@ class RestartOrchestrator(
         var pendingBatches: ArrayDeque<List<PlayerId>> = ArrayDeque(),
         var nextBatchAt: Instant? = null,
         var fallbackDisconnectIssued: Boolean = false,
+        val transferResults: MutableMap<PlayerId, CompletableFuture<Boolean>> = mutableMapOf(),
+        val disconnectResults: MutableMap<PlayerId, CompletableFuture<Boolean>> = mutableMapOf(),
         var restartDeliveryId: UUID? = null,
         var preparedBaselineBootId: UUID? = null,
     )
@@ -187,6 +190,9 @@ class RestartOrchestrator(
 
     private fun startDrain(target: ServerId, cfg: QueueRestartConfig, s: TargetState, now: Instant) {
         s.drainStartedAt = now
+        s.transferResults.clear()
+        s.disconnectResults.clear()
+        s.fallbackDisconnectIssued = false
         // Drain whoever's actually on the target right now. Cohort is the
         // arm-time roster (REQ-030) and only governs rejoin — using it for
         // drain would skip players who joined after arming.
@@ -201,10 +207,11 @@ class RestartOrchestrator(
         val batches = planner.plan(candidates, cfg.drain.drainOrder, cfg.drain.batchSize)
         s.pendingBatches = ArrayDeque(batches)
         s.nextBatchAt = now
-        // Dispatch first batch immediately so single-tick tests see progress
+        // Dispatch first batch immediately so single-tick tests see progress.
         dispatchDueBatches(cfg, s, now)
-        // If the target is already empty, dispatch the immediate shutdown now.
-        if (proxy.playersOn(target).isEmpty()) {
+        // A roster can become empty slightly before Velocity completes the
+        // connection request. Do not restart underneath an in-flight transfer.
+        if (proxy.playersOn(target).isEmpty() && s.transferResults.values.all { it.isDone }) {
             sendRestart(target, s, now)
         }
     }
@@ -213,44 +220,59 @@ class RestartOrchestrator(
         dispatchDueBatches(cfg, s, now)
 
         val remaining = proxy.playersOn(target)
-        if (remaining.isEmpty()) {
-            sendRestart(target, s, now)
-            return
-        }
-
         val started = s.drainStartedAt ?: now
         val elapsed = Duration.between(started, now).seconds
         val timedOut = elapsed >= cfg.drain.forceDrainTimeoutSeconds
+        val transfersComplete = s.transferResults.values.all { it.isDone }
+
+        if (remaining.isEmpty()) {
+            if (transfersComplete || timedOut) {
+                sendRestart(target, s, now)
+            }
+            return
+        }
+
         val transferSettled = s.pendingBatches.isEmpty() &&
+            transfersComplete &&
             s.nextBatchAt?.let { !now.isBefore(it) } == true
 
-        // Once every transfer batch has had one full batch interval to settle,
-        // disconnect only the players who are still stuck on the backend.
-        // This covers a failed hub transfer and drain-bypass holders without
-        // kicking players who are successfully moving between servers.
+        // Do not infer transfer completion from elapsed time alone. Velocity's
+        // connection request may still be resolving even after the batch cadence
+        // elapsed; disconnecting at that point races the successful hub move.
         if ((transferSettled || timedOut) && !s.fallbackDisconnectIssued) {
             remaining.forEach { playerId ->
-                audience.disconnect(
+                s.disconnectResults[playerId] = audience.disconnectAndAwait(
                     playerId,
                     cfg.accessMessages.drainDisconnect,
                     mapOf("server" to target.value, "hub" to cfg.hubServer.value),
-                )
+                ).toCompletableFuture().exceptionally { false }
             }
             s.fallbackDisconnectIssued = true
         }
 
-        // The regular path waits for Velocity to observe an empty target on
-        // the next tick. The force timeout remains the final safety valve: all
-        // remaining disconnects are issued before the immediate restart arm.
-        if (timedOut) sendRestart(target, s, now)
+        // Successful disconnect settlement is the normal restart path. The
+        // configured force timeout remains a hard upper bound even if an
+        // adapter returns a disconnect stage that never completes.
+        if (s.fallbackDisconnectIssued) {
+            val disconnectsSettled = s.disconnectResults.values.all { it.isDone && it.getNow(false) }
+            if (disconnectsSettled || timedOut) {
+                sendRestart(target, s, now)
+            }
+        }
     }
 
     private fun dispatchDueBatches(cfg: QueueRestartConfig, s: TargetState, now: Instant) {
         val intervalMillis = (cfg.drain.batchIntervalTicks * 50L) // 1 tick = 50ms
         while (s.pendingBatches.isNotEmpty() && (s.nextBatchAt == null || !now.isBefore(s.nextBatchAt))) {
             val batch = s.pendingBatches.removeFirst()
-            val hub = hubResolver.resolve(cfg.hubServer, cfg.fallbackHubs) ?: cfg.hubServer
-            for (pid in batch) proxy.transferPlayer(pid, hub)
+            val hub = hubResolver.resolve(cfg.hubServer, cfg.fallbackHubs)
+            for (pid in batch) {
+                s.transferResults[pid] = if (hub == null) {
+                    CompletableFuture.completedFuture(false)
+                } else {
+                    proxy.transferPlayerAwaitable(pid, hub).toCompletableFuture().exceptionally { false }
+                }
+            }
             s.nextBatchAt = now.plusMillis(intervalMillis)
         }
     }

@@ -4,6 +4,8 @@ import com.badgersmc.queuerestart.common.schedule.BackendSchedule
 import com.badgersmc.queuerestart.velocity.application.ports.ProxyPort
 import com.badgersmc.queuerestart.velocity.domain.id.PlayerId
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 
 /**
  * Thin abstraction over Velocity's `ProxyServer` / `Player` /
@@ -17,6 +19,10 @@ interface VelocityProxyBackend {
     fun isReachable(serverId: ServerId): Boolean
     fun playersOn(serverId: ServerId): Set<PlayerId>
     fun transferPlayer(playerId: PlayerId, target: ServerId)
+    fun transferPlayerAwaitable(playerId: PlayerId, target: ServerId): CompletionStage<Boolean> {
+        transferPlayer(playerId, target)
+        return CompletableFuture.completedFuture(true)
+    }
     fun registeredServerIds(): Set<ServerId>
     fun pingForSchedule(serverId: ServerId): BackendSchedule?
 }
@@ -44,6 +50,9 @@ class ProxyAdapter(private val backend: VelocityProxyBackend) : ProxyPort {
     override fun transferPlayer(playerId: PlayerId, target: ServerId) {
         backend.transferPlayer(playerId, target)
     }
+
+    override fun transferPlayerAwaitable(playerId: PlayerId, target: ServerId): CompletionStage<Boolean> =
+        backend.transferPlayerAwaitable(playerId, target)
 
     override fun registeredServerIds(): Set<ServerId> =
         backend.registeredServerIds()

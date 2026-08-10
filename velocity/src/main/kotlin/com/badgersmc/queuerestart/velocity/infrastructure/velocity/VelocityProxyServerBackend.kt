@@ -7,6 +7,8 @@ import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import com.velocitypowered.api.proxy.ProxyServer
 import org.slf4j.Logger
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 import java.util.concurrent.TimeUnit
 
 /**
@@ -84,17 +86,32 @@ class VelocityProxyServerBackend(
     }
 
     override fun transferPlayer(playerId: PlayerId, target: ServerId) {
+        transferPlayerAwaitable(playerId, target)
+    }
+
+    override fun transferPlayerAwaitable(playerId: PlayerId, target: ServerId): CompletionStage<Boolean> {
         val player = proxy.getPlayer(playerId.uuid).orElse(null)
         if (player == null) {
-            logger.debug("transferPlayer: player {} offline; skipping", playerId.uuid)
-            return
+            logger.debug("transferPlayer: player {} offline; treating as drained", playerId.uuid)
+            return CompletableFuture.completedFuture(true)
         }
         val server = proxy.getServer(target.value).orElse(null)
         if (server == null) {
-            logger.warn("transferPlayer: server '{}' not registered; skipping {}", target.value, player.username)
-            return
+            logger.warn("transferPlayer: server '{}' not registered; cannot move {}", target.value, player.username)
+            return CompletableFuture.completedFuture(false)
         }
-        player.createConnectionRequest(server).fireAndForget()
+        return player.createConnectionRequest(server).connect().toCompletableFuture().handle { result, error ->
+            val successful = error == null && result != null && result.isSuccessful
+            if (!successful) {
+                logger.warn(
+                    "transferPlayer: failed to move {} to '{}': {}",
+                    player.username,
+                    target.value,
+                    error?.javaClass?.simpleName ?: "unsuccessful connection result",
+                )
+            }
+            successful
+        }
     }
 
     /**

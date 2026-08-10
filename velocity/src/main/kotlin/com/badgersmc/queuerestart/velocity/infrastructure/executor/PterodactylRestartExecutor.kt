@@ -3,6 +3,7 @@ package com.badgersmc.queuerestart.velocity.infrastructure.executor
 import com.badgersmc.queuerestart.velocity.application.ports.ExternalRestartExecutor
 import com.badgersmc.queuerestart.velocity.application.ports.NetworkRestartConfig
 import com.badgersmc.queuerestart.velocity.application.ports.PowerActionResult
+import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.net.URI
 import java.net.http.HttpClient
@@ -76,9 +77,9 @@ class DryRunRestartExecutor : ExternalRestartExecutor {
     override val name: String = "DRY_RUN"
     override val performsPowerActions: Boolean = false
     override fun preflight(panelServerId: String): CompletionStage<PowerActionResult> =
-        CompletableFuture.completedFuture(PowerActionResult(true, "dry-run preflight"))
+        CompletableFuture.completedFuture(PowerActionResult(true, "DRY_RUN: no Pterodactyl request was sent"))
     override fun restart(actionKey: String, panelServerId: String): CompletionStage<PowerActionResult> =
-        CompletableFuture.completedFuture(PowerActionResult(true, "dry-run restart accepted"))
+        CompletableFuture.completedFuture(PowerActionResult(true, "DRY_RUN: no Pterodactyl power action was sent"))
 }
 
 /**
@@ -89,8 +90,9 @@ class DryRunRestartExecutor : ExternalRestartExecutor {
 class ConfiguredRestartExecutor(
     private val configSupplier: () -> NetworkRestartConfig,
 ) : ExternalRestartExecutor {
+    private val logger = LoggerFactory.getLogger("queue-restart")
     private var currentConfig = configSupplier()
-    private var current: ExternalRestartExecutor = create(currentConfig)
+    private var current: ExternalRestartExecutor = createAndReport(currentConfig)
 
     override val name: String get() = delegate().name
     override val performsPowerActions: Boolean get() = delegate().performsPowerActions
@@ -106,9 +108,20 @@ class ConfiguredRestartExecutor(
         val updated = configSupplier()
         if (updated != currentConfig) {
             currentConfig = updated
-            current = create(updated)
+            current = createAndReport(updated)
         }
         return current
+    }
+
+    private fun createAndReport(config: NetworkRestartConfig): ExternalRestartExecutor {
+        val executor = create(config)
+        if (config.enabled && !executor.performsPowerActions) {
+            logger.warn(
+                "queue-restart: network-restart is enabled with executor={}; proxy/network plans are validation-only and WILL NOT restart Pterodactyl servers",
+                config.executorType,
+            )
+        }
+        return executor
     }
 
     private fun create(config: NetworkRestartConfig): ExternalRestartExecutor =

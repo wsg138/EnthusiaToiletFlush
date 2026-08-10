@@ -10,6 +10,9 @@ import net.kyori.adventure.key.Key
 import net.kyori.adventure.sound.Sound
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
+import java.util.concurrent.TimeUnit
 
 /**
  * REQ-003, REQ-004.
@@ -37,6 +40,18 @@ class AdventureAudienceAdapter(
         logger.debug("disconnected {} with queue-restart message", player.username)
     }
 
+    override fun disconnectAndAwait(
+        playerId: PlayerId,
+        miniMessage: String,
+        placeholders: Map<String, String>,
+    ): CompletionStage<Boolean> {
+        val player = proxyServer.getPlayer(playerId.uuid).orElse(null)
+            ?: return CompletableFuture.completedFuture(true)
+        player.disconnect(renderer.render(miniMessage, placeholders))
+        logger.debug("disconnect requested for {}; awaiting proxy settlement", player.username)
+        return awaitPlayerGone(playerId, 0)
+    }
+
     override fun playSound(target: ServerId, cue: SoundCue) {
         val sound = Sound.sound(
             Key.key(cue.key),
@@ -52,7 +67,26 @@ class AdventureAudienceAdapter(
         )
     }
 
+    private fun awaitPlayerGone(playerId: PlayerId, attempt: Int): CompletionStage<Boolean> {
+        if (proxyServer.getPlayer(playerId.uuid).isEmpty) {
+            return CompletableFuture.completedFuture(true)
+        }
+        if (attempt >= DISCONNECT_SETTLE_ATTEMPTS) {
+            logger.warn("queue-restart: player {} remained connected after disconnect settle window", playerId.uuid)
+            return CompletableFuture.completedFuture(false)
+        }
+        return CompletableFuture.runAsync(
+            {},
+            CompletableFuture.delayedExecutor(DISCONNECT_SETTLE_POLL_MILLIS, TimeUnit.MILLISECONDS),
+        ).thenCompose { awaitPlayerGone(playerId, attempt + 1) }
+    }
+
     private fun playersOn(target: ServerId): Sequence<Player> =
         proxyServer.allPlayers.asSequence()
             .filter { p -> p.currentServer.map { it.serverInfo.name == target.value }.orElse(false) }
+
+    companion object {
+        private const val DISCONNECT_SETTLE_POLL_MILLIS = 50L
+        private const val DISCONNECT_SETTLE_ATTEMPTS = 100 // five seconds maximum
+    }
 }
