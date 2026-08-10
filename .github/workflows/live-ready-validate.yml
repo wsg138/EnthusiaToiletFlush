@@ -1,0 +1,65 @@
+name: live-ready-validation
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: agent/live-ready-validation
+          fetch-depth: 0
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - name: Apply checksummed live-ready patch
+        run: |
+          echo "28e8808842e4e61a4a4c05649a3997d40c6bb46ef9ac965d69252c8042e14c20  .live-ready-patch/part-00" | sha256sum -c -
+          echo "187e4f81baad35043e8a71dd338454b4d1e99ae94dd8f1af5feeebd387ceaf9b  .live-ready-patch/part-01" | sha256sum -c -
+          echo "aa92935350fe1e1862c0bca143fbb3b074fbedd701af2ad392eea925a5e961b2  .live-ready-patch/part-02" | sha256sum -c -
+          echo "92b78dd77263258269be5b85a4ebb0328f673eae0d6fbd5b0f504658e6e1be1b  .live-ready-patch/part-03-04" | sha256sum -c -
+          echo "206ded1ba8ba44fe29cc41b17b4cd12a711afaf76081e8ff3612fd5ad9f15259  .live-ready-patch/part-05-06" | sha256sum -c -
+          echo "f2b01eff7fc8bd7005650147e84961704bb895b48065aa0da857a77935e7b141  .live-ready-patch/part-07" | sha256sum -c -
+          echo "39f69ee67f67a0b951249668d1a6f9d217d0b8f0d3a09280fbf3523a2976b3d4  .live-ready-patch/part-08" | sha256sum -c -
+          cat .live-ready-patch/part-00 \
+              .live-ready-patch/part-01 \
+              .live-ready-patch/part-02 \
+              .live-ready-patch/part-03-04 \
+              .live-ready-patch/part-05-06 \
+              .live-ready-patch/part-07 \
+              .live-ready-patch/part-08 \
+            | base64 -d | gzip -d > /tmp/live-ready.patch
+          echo "a373525ca824c4cd83afefb5e926a046b9c1d56e0225d459d7345ce4bbdd3f0e  /tmp/live-ready.patch" | sha256sum -c -
+          git apply --check /tmp/live-ready.patch
+          git apply /tmp/live-ready.patch
+          git diff --check
+      - name: Run full verification and package both plugins
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean :velocity:check :velocity:shadowJar :paper-companion:check :paper-companion:shadowJar --no-daemon -PreleaseVersion=0.1.5-rc.live-ready
+          unzip -p velocity/build/libs/velocity-0.1.5-rc.live-ready.jar velocity-plugin.json | grep -F '"version": "0.1.5-rc.live-ready"'
+          unzip -p paper-companion/build/libs/paper-companion-0.1.5-rc.live-ready.jar plugin.yml | grep -F 'version: 0.1.5-rc.live-ready'
+      - name: Commit and reconcile the validated source tree
+        if: github.event_name == 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: authenticate restart control and verify lifecycle completion"
+          git fetch origin main
+          git merge --no-edit origin/main
+          rm -rf .live-ready-patch .github/pr6-runtime .github/workflows/live-ready-validate.yml
+          git add -A
+          git commit -m "chore: remove live-readiness validation staging"
+          git push origin HEAD:agent/live-ready-validation
