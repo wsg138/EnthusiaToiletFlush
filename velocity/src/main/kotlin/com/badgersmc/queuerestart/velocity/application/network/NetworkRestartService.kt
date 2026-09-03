@@ -49,6 +49,7 @@ class NetworkRestartService(
     private val prepareBackendHandoff: (ServerId, UUID) -> Boolean = { _, _ -> false },
     private val currentProxyBootId: UUID = UUID.randomUUID(),
     private val executionTimeout: () -> Duration = { Duration.ofMinutes(10) },
+    private val handoffRetryDelay: () -> Duration = { Duration.ofSeconds(5) },
     private val serverReviewResolver: (ServerId) -> Unit = {},
 ) {
     private val plans = ConcurrentHashMap<UUID, RestartPlan>()
@@ -257,7 +258,7 @@ class NetworkRestartService(
         }
         plan.baselineBootIds.clear()
         plan.baselineBootIds[target] = baseline
-        plan.executionDeadlineAt = now.plus(executionTimeout())
+        plan.executionDeadlineAt = now.plus(handoffRetryDelay())
         plan.state = PlanState.DISPATCHING
         plan.actionStarted = false
         audit(plan, "backend restart prepared with authenticated boot baseline $baseline")
@@ -275,6 +276,7 @@ class NetworkRestartService(
             return false
         }
         plan.actionStarted = true
+        plan.executionDeadlineAt = Instant.now().plus(executionTimeout())
         plan.targetResults[target.value] = "authenticated restart delivery published"
         audit(plan, "backend restart delivery published")
         save()
@@ -288,24 +290,36 @@ class NetworkRestartService(
                 val baseline = plan.baselineBootIds[target]
                     ?: return requireReview(plan, "server execution has no persisted boot baseline")
                 val current = backendIdentity(target)
-                val abortReason = when {
-                    current == null ->
-                        "authenticated companion heartbeat became unavailable before restart delivery; no restart command was sent"
-                    current != baseline ->
-                        "authenticated companion boot identity changed before restart delivery (expected $baseline, observed $current); no restart command was sent"
-                    else -> null
-                }
-                if (abortReason != null) {
-                    // No delivery has been published while actionStarted is false,
-                    // so resetting the ephemeral drain and failing the plan is
-                    // safe. This restores backend access instead of wedging the
-                    // target in DISPATCHING/NEEDS_REVIEW.
+                if (current != null && current != baseline) {
+                    // A different authenticated JVM is already present. Sending
+                    // the prepared shutdown to it could double-restart a server
+                    // that was replaced outside QueueRestart, so abort safely.
                     serverReviewResolver(target)
                     plan.targetResults[target.value] = "restart aborted before delivery publication"
                     plan.executionDeadlineAt = null
-                    fail(plan, abortReason)
+                    fail(
+                        plan,
+                        "authenticated companion boot identity changed before restart delivery " +
+                            "(expected $baseline, observed $current); no restart command was sent",
+                    )
                     return
                 }
+                if (current == null && deadlineElapsed(plan, now)) {
+                    // Give the companion one short poll window to recover with
+                    // the same boot UUID. Only fail after that retry opportunity.
+                    serverReviewResolver(target)
+                    plan.targetResults[target.value] = "restart aborted after one companion retry window"
+                    plan.executionDeadlineAt = null
+                    fail(
+                        plan,
+                        "authenticated companion heartbeat remained unavailable through one " +
+                            "${handoffRetryDelay().seconds}s retry window; no restart command was sent",
+                    )
+                    return
+                }
+                // Same boot identity (or a temporary heartbeat gap still inside
+                // the retry window): let the orchestrator publish on this tick.
+                return
             }
             if (deadlineElapsed(plan, now)) {
                 requireReview(plan, "restart handoff was prepared but publication was not durably confirmed")
