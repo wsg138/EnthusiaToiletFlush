@@ -258,7 +258,10 @@ class NetworkRestartService(
         }
         plan.baselineBootIds.clear()
         plan.baselineBootIds[target] = baseline
-        plan.executionDeadlineAt = now.plus(handoffRetryDelay())
+        // No execution deadline exists before publication. If the companion
+        // later disappears, monitorExecution starts one retry window from the
+        // first observed missing heartbeat rather than consuming it during drain.
+        plan.executionDeadlineAt = null
         plan.state = PlanState.DISPATCHING
         plan.actionStarted = false
         audit(plan, "backend restart prepared with authenticated boot baseline $baseline")
@@ -304,21 +307,41 @@ class NetworkRestartService(
                     )
                     return
                 }
-                if (current == null && deadlineElapsed(plan, now)) {
-                    // Give the companion one short poll window to recover with
-                    // the same boot UUID. Only fail after that retry opportunity.
-                    serverReviewResolver(target)
-                    plan.targetResults[target.value] = "restart aborted after one companion retry window"
-                    plan.executionDeadlineAt = null
-                    fail(
-                        plan,
-                        "authenticated companion heartbeat remained unavailable through one " +
-                            "${handoffRetryDelay().seconds}s retry window; no restart command was sent",
-                    )
+                if (current == null) {
+                    val retryDeadline = plan.executionDeadlineAt
+                    if (retryDeadline == null) {
+                        plan.executionDeadlineAt = now.plus(handoffRetryDelay())
+                        audit(
+                            plan,
+                            "companion heartbeat unavailable before restart delivery; " +
+                                "retrying for ${handoffRetryDelay().seconds}s",
+                        )
+                        save()
+                        return
+                    }
+                    if (!now.isBefore(retryDeadline)) {
+                        // The one retry window elapsed without the original JVM
+                        // returning. No delivery was published, so failing and
+                        // reopening access is safe.
+                        serverReviewResolver(target)
+                        plan.targetResults[target.value] = "restart aborted after one companion retry window"
+                        plan.executionDeadlineAt = null
+                        fail(
+                            plan,
+                            "authenticated companion heartbeat remained unavailable through one " +
+                                "${handoffRetryDelay().seconds}s retry window; no restart command was sent",
+                        )
+                    }
                     return
                 }
-                // Same boot identity (or a temporary heartbeat gap still inside
-                // the retry window): let the orchestrator publish on this tick.
+                if (plan.executionDeadlineAt != null) {
+                    // The same authenticated JVM returned inside the retry
+                    // window. Clear the retry deadline so publication can
+                    // proceed normally on this tick.
+                    plan.executionDeadlineAt = null
+                    audit(plan, "companion heartbeat recovered before restart delivery")
+                    save()
+                }
                 return
             }
             if (deadlineElapsed(plan, now)) {
