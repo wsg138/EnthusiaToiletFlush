@@ -283,6 +283,30 @@ class NetworkRestartService(
 
     private fun monitorExecution(plan: RestartPlan, now: Instant) {
         if (!plan.actionStarted) {
+            if (plan.type == PlanType.SERVER) {
+                val target = plan.targets.single()
+                val baseline = plan.baselineBootIds[target]
+                    ?: return requireReview(plan, "server execution has no persisted boot baseline")
+                val current = backendIdentity(target)
+                val abortReason = when {
+                    current == null ->
+                        "authenticated companion heartbeat became unavailable before restart delivery; no restart command was sent"
+                    current != baseline ->
+                        "authenticated companion boot identity changed before restart delivery (expected $baseline, observed $current); no restart command was sent"
+                    else -> null
+                }
+                if (abortReason != null) {
+                    // No delivery has been published while actionStarted is false,
+                    // so resetting the ephemeral drain and failing the plan is
+                    // safe. This restores backend access instead of wedging the
+                    // target in DISPATCHING/NEEDS_REVIEW.
+                    serverReviewResolver(target)
+                    plan.targetResults[target.value] = "restart aborted before delivery publication"
+                    plan.executionDeadlineAt = null
+                    fail(plan, abortReason)
+                    return
+                }
+            }
             if (deadlineElapsed(plan, now)) {
                 requireReview(plan, "restart handoff was prepared but publication was not durably confirmed")
             }
