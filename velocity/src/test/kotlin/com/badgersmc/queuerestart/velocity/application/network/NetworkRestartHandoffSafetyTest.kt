@@ -55,7 +55,48 @@ class NetworkRestartHandoffSafetyTest {
     }
 
     @Test
-    fun `missing companion before publication aborts restart and reopens backend access`() {
+    fun `missing companion gets one retry window and same boot can recover`() {
+        val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
+        val boots = mutableMapOf(
+            hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
+            smp to expectedBoot,
+        )
+        val resets = mutableListOf<ServerId>()
+        val warningAt = Instant.now().plusSeconds(10)
+        val service = service(boots) { resets += it }
+        val plan = service.createManual(
+            PlanType.SERVER,
+            setOf(smp),
+            warningAt.plusSeconds(1),
+            warningAt,
+            "heartbeat retry",
+            "console",
+            false,
+        )
+
+        service.tick(warningAt)
+        service.tick(warningAt.plusSeconds(2))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+
+        boots.remove(smp)
+        service.tick(warningAt.plusSeconds(3))
+
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(plan.actionStarted).isFalse()
+        assertThat(service.blocksBackendAccess(smp)).isTrue()
+        assertThat(resets).isEmpty()
+
+        boots[smp] = expectedBoot
+        service.tick(warningAt.plusSeconds(4))
+
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(service.markBackendHandoffPublished(smp, expectedBoot)).isTrue()
+        assertThat(plan.actionStarted).isTrue()
+        assertThat(resets).isEmpty()
+    }
+
+    @Test
+    fun `missing companion through retry window aborts restart and reopens backend access`() {
         val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
         val boots = mutableMapOf(
             hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
@@ -76,17 +117,21 @@ class NetworkRestartHandoffSafetyTest {
 
         service.tick(warningAt)
         service.tick(warningAt.plusSeconds(2))
+        boots.remove(smp)
+
+        service.tick(warningAt.plusSeconds(3))
         assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
         assertThat(service.blocksBackendAccess(smp)).isTrue()
+        assertThat(resets).isEmpty()
 
-        boots.remove(smp)
-        service.tick(warningAt.plusSeconds(3))
+        service.tick(warningAt.plusSeconds(8))
 
         assertThat(plan.state).isEqualTo(PlanState.FAILED)
         assertThat(plan.actionStarted).isFalse()
-        assertThat(plan.failure).contains("heartbeat became unavailable")
+        assertThat(plan.failure).contains("remained unavailable")
+        assertThat(plan.failure).contains("5s retry window")
         assertThat(plan.failure).contains("no restart command was sent")
-        assertThat(plan.targetResults[smp.value]).isEqualTo("restart aborted before delivery publication")
+        assertThat(plan.targetResults[smp.value]).isEqualTo("restart aborted after one companion retry window")
         assertThat(service.blocksBackendAccess(smp)).isFalse()
         assertThat(resets).containsExactly(smp)
     }
@@ -152,6 +197,7 @@ class NetworkRestartHandoffSafetyTest {
             backendIdentity = { boots[it] },
             prepareBackendHandoff = { _, _ -> true },
             currentProxyBootId = UUID.fromString("40000000-0000-0000-0000-000000000010"),
+            handoffRetryDelay = { Duration.ofSeconds(5) },
             serverReviewResolver = serverReviewResolver,
         )
     }
