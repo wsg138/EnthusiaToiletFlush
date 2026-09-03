@@ -294,10 +294,13 @@ class RestartOrchestrator(
             ?: throw IllegalStateException("restart handoff for ${target.value} was not durably prepared")
 
         if (targetState.restartDeliveryId == null) {
-            val currentIdentity = companionIdentity(target)
-            check(currentIdentity == preparedBaseline) {
-                "authenticated companion identity changed before restart delivery for ${target.value}"
-            }
+            // Durable plan reconciliation runs before this orchestrator each tick.
+            // The identity can still become stale/change in the narrow interval
+            // between those two calls. Never throw or publish to an unverified
+            // JVM here; the next durable tick will abort the unpublished handoff.
+            val currentIdentity = companionIdentity(target) ?: return
+            if (currentIdentity != preparedBaseline) return
+
             val deliveryId = pendingArmStore.put(
                 target,
                 mode = restartMode,
