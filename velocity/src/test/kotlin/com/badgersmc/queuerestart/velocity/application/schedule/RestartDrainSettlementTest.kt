@@ -3,6 +3,7 @@ package com.badgersmc.queuerestart.velocity.application.schedule
 import com.badgersmc.queuerestart.common.protocol.CheckOutcome
 import com.badgersmc.queuerestart.common.protocol.RestartMode
 import com.badgersmc.queuerestart.common.schedule.BackendSchedule
+import com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore
 import com.badgersmc.queuerestart.velocity.application.drain.DrainOrder
 import com.badgersmc.queuerestart.velocity.application.drain.DrainPlanner
 import com.badgersmc.queuerestart.velocity.application.drain.HubResolver
@@ -50,13 +51,14 @@ class RestartDrainSettlementTest {
 
         fixture.orchestrator.tick(t0.plusSeconds(12))
         assertThat(audience.disconnects).isEmpty()
-        assertThat(fixture.messaging.restarts).isZero()
+        assertThat(fixture.dispatches[0]).isZero()
 
         transfer.complete(false)
         fixture.orchestrator.tick(t0.plusSeconds(13))
 
         assertThat(audience.disconnects).containsExactly(player)
-        assertThat(fixture.messaging.restarts).isEqualTo(1)
+        assertThat(fixture.dispatches[0]).isEqualTo(1)
+        assertThat(fixture.messaging.directRestarts).isZero()
     }
 
     @Test
@@ -75,11 +77,13 @@ class RestartDrainSettlementTest {
 
         proxy.playersOnTarget.clear()
         fixture.orchestrator.tick(t0.plusSeconds(11))
-        assertThat(fixture.messaging.restarts).isZero()
+        assertThat(fixture.dispatches[0]).isZero()
 
         transfer.complete(true)
         fixture.orchestrator.tick(t0.plusSeconds(12))
-        assertThat(fixture.messaging.restarts).isEqualTo(1)
+        assertThat(fixture.dispatches[0]).isEqualTo(1)
+        assertThat(fixture.pending.peekDelivery(survival, t0.plusSeconds(12))).isNotNull
+        assertThat(fixture.messaging.directRestarts).isZero()
     }
 
     @Test
@@ -97,13 +101,14 @@ class RestartDrainSettlementTest {
         fixture.orchestrator.tick(t0.plusSeconds(12))
 
         assertThat(audience.disconnects).containsExactly(player)
-        assertThat(fixture.messaging.restarts).isZero()
+        assertThat(fixture.dispatches[0]).isZero()
 
         proxy.playersOnTarget.remove(player)
         audience.disconnectResult.complete(true)
         fixture.orchestrator.tick(t0.plusSeconds(13))
 
-        assertThat(fixture.messaging.restarts).isEqualTo(1)
+        assertThat(fixture.dispatches[0]).isEqualTo(1)
+        assertThat(fixture.messaging.directRestarts).isZero()
     }
 
     @Test
@@ -122,17 +127,20 @@ class RestartDrainSettlementTest {
 
         assertThat(audience.disconnects).containsExactly(player)
         assertThat(audience.disconnectResult).isNotDone()
-        assertThat(fixture.messaging.restarts).isZero()
+        assertThat(fixture.dispatches[0]).isZero()
 
         fixture.orchestrator.tick(t0.plusSeconds(130))
 
         assertThat(audience.disconnectResult).isNotDone()
-        assertThat(fixture.messaging.restarts).isEqualTo(1)
+        assertThat(fixture.dispatches[0]).isEqualTo(1)
+        assertThat(fixture.messaging.directRestarts).isZero()
     }
 
     private fun fixture(proxy: SettlementProxy, audience: SettlementAudience): Fixture {
         val registry = CoordinatorRegistry()
         val messaging = SettlementMessaging()
+        val pending = PendingArmStore()
+        val dispatches = intArrayOf(0)
         val cfg = QueueRestartConfig(
             hubServer = hub,
             fallbackHubs = emptyList(),
@@ -163,11 +171,15 @@ class RestartDrainSettlementTest {
             gate = gate,
             rankLadder = RankLadder(emptyMap(), 0),
             configSupplier = { cfg },
+            pendingArmStore = pending,
             companionIdentity = { baseline },
-            onRestartPublished = { _, _ -> true },
+            onRestartDispatchCommitted = { _, _, _ ->
+                dispatches[0]++
+                true
+            },
         )
         orchestrator.start()
-        return Fixture(orchestrator, registry, messaging, baseline)
+        return Fixture(orchestrator, registry, messaging, pending, baseline, dispatches)
     }
 
     private fun cohort() = Cohort(setOf(CohortMember(player)))
@@ -176,7 +188,9 @@ class RestartDrainSettlementTest {
         val orchestrator: RestartOrchestrator,
         val registry: CoordinatorRegistry,
         val messaging: SettlementMessaging,
+        val pending: PendingArmStore,
         val baseline: UUID,
+        val dispatches: IntArray,
     )
 
     private class SettlementProxy(player: PlayerId, private val hub: ServerId) : ProxyPort {
@@ -219,7 +233,7 @@ class RestartDrainSettlementTest {
     }
 
     private class SettlementMessaging : MessagingPort {
-        var restarts = 0
+        var directRestarts = 0
         override fun sendDrainRequest(target: ServerId) = Unit
         override fun sendRestartNow(
             target: ServerId,
@@ -228,7 +242,7 @@ class RestartDrainSettlementTest {
             argument: String,
             delaySeconds: Int,
         ) {
-            restarts++
+            directRestarts++
         }
         override fun sendRestartCancel(target: ServerId, deliveryId: UUID) = Unit
         override fun onDrainAck(handler: (ServerId, Int) -> Unit) = Unit
