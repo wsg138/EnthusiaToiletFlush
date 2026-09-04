@@ -49,6 +49,7 @@ class NetworkRestartService(
     private val prepareBackendHandoff: (ServerId, UUID) -> Boolean = { _, _ -> false },
     private val currentProxyBootId: UUID = UUID.randomUUID(),
     private val executionTimeout: () -> Duration = { Duration.ofMinutes(10) },
+    private val handoffRetryDelay: () -> Duration = { Duration.ofSeconds(5) },
     private val serverReviewResolver: (ServerId) -> Unit = {},
 ) {
     private val plans = ConcurrentHashMap<UUID, RestartPlan>()
@@ -257,32 +258,105 @@ class NetworkRestartService(
         }
         plan.baselineBootIds.clear()
         plan.baselineBootIds[target] = baseline
-        plan.executionDeadlineAt = now.plus(executionTimeout())
+        // This marker is written before draining can publish anything. It lets
+        // startup recovery distinguish new, provably-unpublished server plans
+        // from legacy records whose old ordering was ambiguous.
+        plan.targetResults[SERVER_HANDOFF_PROTOCOL_KEY] = SERVER_HANDOFF_PREPARED_V2
+        // No execution deadline exists before publication. If the companion
+        // later disappears, monitorExecution starts one retry window from the
+        // first observed missing heartbeat rather than consuming it during drain.
+        plan.executionDeadlineAt = null
         plan.state = PlanState.DISPATCHING
         plan.actionStarted = false
         audit(plan, "backend restart prepared with authenticated boot baseline $baseline")
         save()
     }
 
-    /** Called synchronously by the orchestrator after publishing the idempotent control delivery. */
+    /**
+     * Write-ahead commit for a managed backend restart. The orchestrator must
+     * call this before making a PendingArmStore delivery visible to Paper.
+     */
     @Synchronized
-    fun markBackendHandoffPublished(target: ServerId, baselineBootId: UUID): Boolean {
+    fun commitBackendHandoffDispatch(target: ServerId, baselineBootId: UUID, now: Instant): Boolean {
         val plan = plans.values.firstOrNull {
             it.type == PlanType.SERVER && target in it.targets && it.state == PlanState.DISPATCHING
         } ?: return false
+        if (plan.actionStarted) return false
         if (plan.baselineBootIds[target] != baselineBootId) {
-            requireReview(plan, "published backend handoff did not match the persisted boot baseline")
+            requireReview(plan, "backend handoff dispatch did not match the persisted boot baseline")
+            return false
+        }
+        if (plan.targetResults[SERVER_HANDOFF_PROTOCOL_KEY] != SERVER_HANDOFF_PREPARED_V2) {
+            requireReview(plan, "backend handoff protocol marker was missing before restart dispatch")
             return false
         }
         plan.actionStarted = true
-        plan.targetResults[target.value] = "authenticated restart delivery published"
-        audit(plan, "backend restart delivery published")
+        plan.executionDeadlineAt = now.plus(executionTimeout())
+        plan.targetResults[SERVER_HANDOFF_PROTOCOL_KEY] = SERVER_HANDOFF_COMMITTED_V2
+        plan.targetResults[target.value] = "authenticated restart delivery dispatch committed"
+        audit(plan, "backend restart delivery dispatch durably committed")
         save()
         return true
     }
 
     private fun monitorExecution(plan: RestartPlan, now: Instant) {
         if (!plan.actionStarted) {
+            if (plan.type == PlanType.SERVER) {
+                val target = plan.targets.single()
+                val baseline = plan.baselineBootIds[target]
+                    ?: return requireReview(plan, "server execution has no persisted boot baseline")
+                val current = backendIdentity(target)
+                if (current != null && current != baseline) {
+                    // A different authenticated JVM is already present. Sending
+                    // the prepared shutdown to it could double-restart a server
+                    // that was replaced outside QueueRestart, so abort safely.
+                    serverReviewResolver(target)
+                    plan.targetResults[target.value] = "restart aborted before delivery publication"
+                    plan.executionDeadlineAt = null
+                    fail(
+                        plan,
+                        "authenticated companion boot identity changed before restart delivery " +
+                            "(expected $baseline, observed $current); no restart command was sent",
+                    )
+                    return
+                }
+                if (current == null) {
+                    val retryDeadline = plan.executionDeadlineAt
+                    if (retryDeadline == null) {
+                        plan.executionDeadlineAt = now.plus(handoffRetryDelay())
+                        audit(
+                            plan,
+                            "companion heartbeat unavailable before restart delivery; " +
+                                "retrying for ${handoffRetryDelay().seconds}s",
+                        )
+                        save()
+                        return
+                    }
+                    if (!now.isBefore(retryDeadline)) {
+                        // The one retry window elapsed without the original JVM
+                        // returning. No delivery was published, so failing and
+                        // reopening access is safe.
+                        serverReviewResolver(target)
+                        plan.targetResults[target.value] = "restart aborted after one companion retry window"
+                        plan.executionDeadlineAt = null
+                        fail(
+                            plan,
+                            "authenticated companion heartbeat remained unavailable through one " +
+                                "${handoffRetryDelay().seconds}s retry window; no restart command was sent",
+                        )
+                    }
+                    return
+                }
+                if (plan.executionDeadlineAt != null) {
+                    // The same authenticated JVM returned inside the retry
+                    // window. Clear the retry deadline so publication can
+                    // proceed normally on this tick.
+                    plan.executionDeadlineAt = null
+                    audit(plan, "companion heartbeat recovered before restart delivery")
+                    save()
+                }
+                return
+            }
             if (deadlineElapsed(plan, now)) {
                 requireReview(plan, "restart handoff was prepared but publication was not durably confirmed")
             }
@@ -847,6 +921,12 @@ class NetworkRestartService(
             plan.proxyBaselineBootId == null &&
             plan.targetResults.isEmpty()
 
+    private fun isProvablyUnpublishedV2ServerHandoff(plan: RestartPlan): Boolean =
+        plan.type == PlanType.SERVER &&
+            !plan.actionStarted &&
+            plan.baselineBootIds.keys == plan.targets &&
+            plan.targetResults[SERVER_HANDOFF_PROTOCOL_KEY] == SERVER_HANDOFF_PREPARED_V2
+
     private fun recover() {
         val now = Instant.now()
         val loaded = store.load()
@@ -925,8 +1005,25 @@ class NetworkRestartService(
     }
 
     private fun recoverDispatching(plan: RestartPlan, now: Instant) {
+        if (isProvablyUnpublishedV2ServerHandoff(plan)) {
+            // New ordering guarantees that actionStarted is persisted before
+            // PendingArmStore can expose a shutdown. This exact state therefore
+            // proves the proxy died before any restart delivery became executable.
+            plan.state = PlanState.FAILED
+            plan.failure = "server restart was interrupted before restart delivery dispatch was committed"
+            plan.maintenanceEnabled = false
+            plan.executionDeadlineAt = null
+            return
+        }
+
         val structurallyComplete = when (plan.type) {
-            PlanType.SERVER -> plan.actionStarted && plan.baselineBootIds.keys == plan.targets && plan.executionDeadlineAt != null
+            PlanType.SERVER -> {
+                val phase = plan.targetResults[SERVER_HANDOFF_PROTOCOL_KEY]
+                plan.actionStarted &&
+                    plan.baselineBootIds.keys == plan.targets &&
+                    plan.executionDeadlineAt != null &&
+                    (phase == null || phase == SERVER_HANDOFF_COMMITTED_V2)
+            }
             PlanType.PROXY -> plan.actionStarted && plan.proxyBaselineBootId != null && plan.executionDeadlineAt != null &&
                 expectedActionKeys(plan).all(plan.acceptedActionKeys::contains)
             PlanType.NETWORK -> plan.actionStarted && plan.proxyBaselineBootId != null && plan.executionDeadlineAt != null &&
@@ -984,6 +1081,9 @@ class NetworkRestartService(
         generateSequence(error) { it.cause }.last().message ?: error.javaClass.simpleName
 
     companion object {
+        internal const val SERVER_HANDOFF_PROTOCOL_KEY = "__server_handoff_protocol"
+        internal const val SERVER_HANDOFF_PREPARED_V2 = "prepared-v2"
+        internal const val SERVER_HANDOFF_COMMITTED_V2 = "committed-v2"
         private const val LEGACY_INTERRUPTED_FAILURE =
             "execution was interrupted after a destructive action may have started"
         private const val MAX_TERMINAL_HISTORY = 500

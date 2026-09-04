@@ -55,7 +55,7 @@ class RestartOrchestrator(
     private val pendingArmStore: PendingArmStore = PendingArmStore(),
     private val options: BackendRestartOptions = BackendRestartOptions(),
     private val companionIdentity: (ServerId) -> UUID? = { null },
-    private val onRestartPublished: (ServerId, UUID) -> Boolean = { _, _ -> true },
+    private val onRestartDispatchCommitted: (ServerId, UUID, Instant) -> Boolean = { _, _, _ -> true },
 ) {
 
     private data class TargetState(
@@ -294,10 +294,19 @@ class RestartOrchestrator(
             ?: throw IllegalStateException("restart handoff for ${target.value} was not durably prepared")
 
         if (targetState.restartDeliveryId == null) {
-            val currentIdentity = companionIdentity(target)
-            check(currentIdentity == preparedBaseline) {
-                "authenticated companion identity changed before restart delivery for ${target.value}"
-            }
+            // Durable plan reconciliation runs before this orchestrator each tick.
+            // The identity can still become stale/change in the narrow interval
+            // between those two calls. Never make a delivery executable for an
+            // unverified JVM; the next durable tick owns abort/retry behavior.
+            val currentIdentity = companionIdentity(target) ?: return
+            if (currentIdentity != preparedBaseline) return
+
+            // Commit the destructive boundary durably BEFORE exposing the arm
+            // through PendingArmStore. A proxy crash before this callback is
+            // therefore provably pre-delivery; a crash after it remains
+            // intentionally fail-closed because Paper may already have polled.
+            if (!onRestartDispatchCommitted(target, preparedBaseline, now)) return
+
             val deliveryId = pendingArmStore.put(
                 target,
                 mode = restartMode,
@@ -307,16 +316,13 @@ class RestartOrchestrator(
                 now = now,
             )
             targetState.restartDeliveryId = deliveryId
-            messaging.sendRestartNow(target, deliveryId, restartMode, restartArg, delaySeconds = 0)
+            // Managed T-0 restarts intentionally use only the authenticated
+            // poll-back transport. It is player-independent, idempotent, and
+            // bound to the exact prepared Paper boot UUID. The legacy direct
+            // plugin-message path is not boot-bound and is therefore unsafe for
+            // this lifecycle-critical dispatch.
         }
 
-        // This callback persists that an idempotent delivery exists before the
-        // ephemeral coordinator advances. If persistence fails, the next tick
-        // retries the callback with the same delivery id rather than creating a
-        // second independently executable restart.
-        check(onRestartPublished(target, preparedBaseline)) {
-            "persisted plan rejected restart publication for ${target.value}"
-        }
         coordinator.restartSent(preparedBaseline)
         state.remove(target)
     }

@@ -193,12 +193,13 @@ class QueueRestartPlugin @Inject constructor(
             checkGate,
         )
 
-        // REQ-022. Pending arms published here are pulled by the
-        // companion's ProxyArmPoller via the ProxyPingArmResponder below.
-        // Intentionally process-local. If Velocity dies after a destructive
-        // delivery may have been published, the durable plan enters review;
-        // replaying an orphaned arm after startup would be unsafe.
-        val pendingArmStore = PendingArmStore()
+        // REQ-022. Pending arms are durably persisted and pulled by the
+        // companion's authenticated ProxyArmPoller. The delivery id and exact
+        // target boot id survive a Velocity restart, so a committed shutdown is
+        // neither silently lost nor replayed against a replacement JVM.
+        val pendingArmStore = PendingArmStore(
+            persistencePath = dataDirectory.resolve("pending-control.state"),
+        )
         val backendOptions = BackendRestartOptions()
 
         val orchestrator = RestartOrchestrator(
@@ -218,9 +219,9 @@ class QueueRestartPlugin @Inject constructor(
             pendingArmStore = pendingArmStore,
             options = backendOptions,
             companionIdentity = freshCompanionIdentity,
-            onRestartPublished = { target, baseline ->
+            onRestartDispatchCommitted = { target, baseline, now ->
                 if (networkServiceReady.get()) {
-                    networkService.markBackendHandoffPublished(target, baseline)
+                    networkService.commitBackendHandoffDispatch(target, baseline, now)
                 } else {
                     false
                 }
@@ -274,6 +275,7 @@ class QueueRestartPlugin @Inject constructor(
             prepareBackendHandoff = orchestrator::prepareRestartHandoff,
             currentProxyBootId = proxyBootId,
             executionTimeout = { Duration.ofSeconds(cfgSnapshot().controlSecurity.backendExecutionTimeoutSeconds) },
+            handoffRetryDelay = { Duration.ofSeconds(cfgSnapshot().controlSecurity.heartbeatTimeoutSeconds) },
             serverReviewResolver = { target -> orchestrator.resolveAfterManualReview(target) },
         )
         networkServiceReady.set(true)

@@ -123,6 +123,7 @@ class RestartOrchestratorTest {
         audience: FakeAudience = FakeAudience(),
         pendingArmStore: com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore =
             com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore(),
+        dispatchCommitSucceeds: Boolean = true,
     ): Pair<RestartOrchestrator, Bundle> {
         audience.onDisconnect = { proxy.playersOnTarget.remove(it) }
         val registry = CoordinatorRegistry()
@@ -135,7 +136,7 @@ class RestartOrchestratorTest {
         val gate = CheckGate(timeoutSeconds = 60, releaseOnTimeout = true)
         val rejoin = RejoinService(proxy, FakeQueue(), RankLadder(emptyMap(), 0), gate)
         val baselineBootId = UUID.randomUUID()
-        val published = mutableListOf<Pair<ServerId, UUID>>()
+        val committed = mutableListOf<Pair<ServerId, UUID>>()
         val orch = RestartOrchestrator(
             registry = registry,
             proxy = proxy,
@@ -152,13 +153,13 @@ class RestartOrchestratorTest {
             restartArg = "",
             pendingArmStore = pendingArmStore,
             companionIdentity = { baselineBootId },
-            onRestartPublished = { target, baseline ->
-                published += target to baseline
-                true
+            onRestartDispatchCommitted = { target, baseline, _ ->
+                committed += target to baseline
+                dispatchCommitSucceeds
             },
         )
         orch.start()
-        return orch to Bundle(registry, proxy, messaging, audience, gate, pendingArmStore, baselineBootId, published)
+        return orch to Bundle(registry, proxy, messaging, audience, gate, pendingArmStore, baselineBootId, committed)
     }
 
     private data class Bundle(
@@ -169,7 +170,7 @@ class RestartOrchestratorTest {
         val gate: CheckGate,
         val pendingArmStore: com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore,
         val baselineBootId: UUID,
-        val published: MutableList<Pair<ServerId, UUID>>,
+        val committed: MutableList<Pair<ServerId, UUID>>,
     )
 
     private fun cohort(vararg names: String) = Cohort(names.map { CohortMember(pid(it)) }.toSet())
@@ -269,7 +270,7 @@ class RestartOrchestratorTest {
     }
 
     @Test
-    fun `empty target receives immediate restart only after T-0`() {
+    fun `empty target publishes boot-bound pull delivery only after durable commit at T-0`() {
         val proxy = FakeProxy(reachable = mutableSetOf(hub))
         val (orch, b) = setup(cfg = config(drainLead = 30), proxy = proxy)
         b.registry.get(survival).arm(Cohort(emptySet()), durationSeconds = 60)
@@ -282,15 +283,33 @@ class RestartOrchestratorTest {
         val restartAt = t0.plusSeconds(60)
         orch.tick(restartAt)
 
-        val restart = b.messaging.restartSent.single()
-        assertThat(restart.server).isEqualTo(survival)
-        assertThat(restart.delaySeconds).isZero()
-        val pending = b.pendingArmStore.peek(survival, restartAt)
-        assertThat(pending?.deliveryId).isEqualTo(restart.deliveryId)
-        assertThat(pending?.delaySeconds).isZero()
-        assertThat(pending?.mode).isEqualTo(RestartMode.SHUTDOWN)
+        assertThat(b.messaging.restartSent).isEmpty()
+        val pending = b.pendingArmStore.peekDelivery(survival, restartAt)
+        assertThat(pending).isNotNull
+        assertThat(pending?.expectedBootId).isEqualTo(b.baselineBootId)
+        val arm = pending?.delivery as com.badgersmc.queuerestart.velocity.application.arm.PendingArmStore.Delivery.Arm
+        assertThat(arm.value.delaySeconds).isZero()
+        assertThat(arm.value.mode).isEqualTo(RestartMode.SHUTDOWN)
         assertThat(b.registry.get(survival).state).isEqualTo(RestartState.RESTART_SENT)
-        assertThat(b.published).containsExactly(survival to b.baselineBootId)
+        assertThat(b.committed).containsExactly(survival to b.baselineBootId)
+    }
+
+    @Test
+    fun `failed durable dispatch commit exposes no shutdown delivery`() {
+        val proxy = FakeProxy(reachable = mutableSetOf(hub))
+        val (orch, b) = setup(proxy = proxy, dispatchCommitSucceeds = false)
+        b.registry.get(survival).arm(Cohort(emptySet()), durationSeconds = 1)
+
+        val t0 = Instant.parse("2026-01-01T00:00:00Z")
+        orch.tick(t0)
+        assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
+        val restartAt = t0.plusSeconds(1)
+        orch.tick(restartAt)
+
+        assertThat(b.committed).containsExactly(survival to b.baselineBootId)
+        assertThat(b.pendingArmStore.peekDelivery(survival, restartAt)).isNull()
+        assertThat(b.messaging.restartSent).isEmpty()
+        assertThat(b.registry.get(survival).state).isEqualTo(RestartState.DRAINING)
     }
 
     @Test
@@ -318,8 +337,10 @@ class RestartOrchestratorTest {
         assertThat(disconnect.message).contains("restarting")
         assertThat(disconnect.placeholders["server"]).isEqualTo("survival")
 
-        orch.tick(t0.plusSeconds(13))
-        assertThat(b.messaging.restartSent.single().delaySeconds).isZero()
+        val restartAt = t0.plusSeconds(13)
+        orch.tick(restartAt)
+        assertThat(b.pendingArmStore.peekDelivery(survival, restartAt)).isNotNull
+        assertThat(b.messaging.restartSent).isEmpty()
         assertThat(b.registry.get(survival).state).isEqualTo(RestartState.RESTART_SENT)
     }
 
@@ -340,10 +361,12 @@ class RestartOrchestratorTest {
         orch.tick(t0)
         assertThat(orch.prepareRestartHandoff(survival, b.baselineBootId)).isTrue()
         orch.tick(t0.plusSeconds(10))
-        orch.tick(t0.plusSeconds(70))
+        val restartAt = t0.plusSeconds(70)
+        orch.tick(restartAt)
 
         assertThat(b.audience.disconnects.map { it.playerId }).containsExactly(pid("stuck"))
-        assertThat(b.messaging.restartSent.single().delaySeconds).isZero()
+        assertThat(b.pendingArmStore.peekDelivery(survival, restartAt)).isNotNull
+        assertThat(b.messaging.restartSent).isEmpty()
         assertThat(b.registry.get(survival).state).isEqualTo(RestartState.RESTART_SENT)
     }
 

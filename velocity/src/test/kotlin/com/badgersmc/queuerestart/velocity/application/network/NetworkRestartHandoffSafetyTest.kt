@@ -25,7 +25,7 @@ class NetworkRestartHandoffSafetyTest {
     private val smp = ServerId("SMP")
 
     @Test
-    fun `mismatched published handoff baseline fails closed before action starts`() {
+    fun `mismatched dispatch baseline fails closed before delivery becomes executable`() {
         val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
         val boots = mutableMapOf(
             hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
@@ -47,14 +47,145 @@ class NetworkRestartHandoffSafetyTest {
         service.tick(warningAt.plusSeconds(2))
         assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
         assertThat(plan.actionStarted).isFalse()
+        assertThat(plan.targetResults[NetworkRestartService.SERVER_HANDOFF_PROTOCOL_KEY])
+            .isEqualTo(NetworkRestartService.SERVER_HANDOFF_PREPARED_V2)
 
-        assertThat(service.markBackendHandoffPublished(smp, UUID.randomUUID())).isFalse()
+        assertThat(
+            service.commitBackendHandoffDispatch(smp, UUID.randomUUID(), warningAt.plusSeconds(3)),
+        ).isFalse()
         assertThat(plan.state).isEqualTo(PlanState.NEEDS_REVIEW)
         assertThat(plan.actionStarted).isFalse()
         assertThat(plan.failure).contains("baseline")
     }
 
-    private fun service(boots: MutableMap<ServerId, UUID>): NetworkRestartService {
+    @Test
+    fun `missing companion gets one retry window and same boot can recover`() {
+        val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
+        val boots = mutableMapOf(
+            hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
+            smp to expectedBoot,
+        )
+        val resets = mutableListOf<ServerId>()
+        val warningAt = Instant.now().plusSeconds(10)
+        val service = service(boots) { resets += it }
+        val plan = service.createManual(
+            PlanType.SERVER,
+            setOf(smp),
+            warningAt.plusSeconds(1),
+            warningAt,
+            "heartbeat retry",
+            "console",
+            false,
+        )
+
+        service.tick(warningAt)
+        service.tick(warningAt.plusSeconds(2))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+
+        boots.remove(smp)
+        service.tick(warningAt.plusSeconds(3))
+
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(plan.actionStarted).isFalse()
+        assertThat(service.blocksBackendAccess(smp)).isTrue()
+        assertThat(resets).isEmpty()
+
+        boots[smp] = expectedBoot
+        service.tick(warningAt.plusSeconds(4))
+
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(
+            service.commitBackendHandoffDispatch(smp, expectedBoot, warningAt.plusSeconds(4)),
+        ).isTrue()
+        assertThat(plan.actionStarted).isTrue()
+        assertThat(plan.targetResults[NetworkRestartService.SERVER_HANDOFF_PROTOCOL_KEY])
+            .isEqualTo(NetworkRestartService.SERVER_HANDOFF_COMMITTED_V2)
+        assertThat(plan.targetResults[smp.value]).contains("dispatch committed")
+        assertThat(resets).isEmpty()
+    }
+
+    @Test
+    fun `missing companion through retry window aborts restart and reopens backend access`() {
+        val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
+        val boots = mutableMapOf(
+            hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
+            smp to expectedBoot,
+        )
+        val resets = mutableListOf<ServerId>()
+        val warningAt = Instant.now().plusSeconds(10)
+        val service = service(boots) { resets += it }
+        val plan = service.createManual(
+            PlanType.SERVER,
+            setOf(smp),
+            warningAt.plusSeconds(1),
+            warningAt,
+            "heartbeat safety",
+            "console",
+            false,
+        )
+
+        service.tick(warningAt)
+        service.tick(warningAt.plusSeconds(2))
+        boots.remove(smp)
+
+        service.tick(warningAt.plusSeconds(3))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+        assertThat(service.blocksBackendAccess(smp)).isTrue()
+        assertThat(resets).isEmpty()
+
+        service.tick(warningAt.plusSeconds(8))
+
+        assertThat(plan.state).isEqualTo(PlanState.FAILED)
+        assertThat(plan.actionStarted).isFalse()
+        assertThat(plan.failure).contains("remained unavailable")
+        assertThat(plan.failure).contains("5s retry window")
+        assertThat(plan.failure).contains("no restart command was sent")
+        assertThat(plan.targetResults[smp.value]).isEqualTo("restart aborted after one companion retry window")
+        assertThat(service.blocksBackendAccess(smp)).isFalse()
+        assertThat(resets).containsExactly(smp)
+    }
+
+    @Test
+    fun `changed companion before dispatch commit aborts without restarting replacement JVM`() {
+        val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
+        val replacementBoot = UUID.fromString("40000000-0000-0000-0000-000000000003")
+        val boots = mutableMapOf(
+            hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
+            smp to expectedBoot,
+        )
+        val resets = mutableListOf<ServerId>()
+        val warningAt = Instant.now().plusSeconds(10)
+        val service = service(boots) { resets += it }
+        val plan = service.createManual(
+            PlanType.SERVER,
+            setOf(smp),
+            warningAt.plusSeconds(1),
+            warningAt,
+            "identity safety",
+            "console",
+            false,
+        )
+
+        service.tick(warningAt)
+        service.tick(warningAt.plusSeconds(2))
+        assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
+
+        boots[smp] = replacementBoot
+        service.tick(warningAt.plusSeconds(3))
+
+        assertThat(plan.state).isEqualTo(PlanState.FAILED)
+        assertThat(plan.actionStarted).isFalse()
+        assertThat(plan.failure).contains("boot identity changed before restart delivery")
+        assertThat(plan.failure).contains(expectedBoot.toString())
+        assertThat(plan.failure).contains(replacementBoot.toString())
+        assertThat(service.blocksBackendAccess(smp)).isFalse()
+        assertThat(resets).containsExactly(smp)
+    }
+
+    private fun service(
+        boots: MutableMap<ServerId, UUID>,
+        serverReviewResolver: (ServerId) -> Unit = {},
+    ): NetworkRestartService {
         val config = NetworkRestartConfig.disabled().copy(
             enabled = true,
             serverIds = mapOf(hub to "hub1234", smp to "smp1234"),
@@ -75,6 +206,8 @@ class NetworkRestartHandoffSafetyTest {
             backendIdentity = { boots[it] },
             prepareBackendHandoff = { _, _ -> true },
             currentProxyBootId = UUID.fromString("40000000-0000-0000-0000-000000000010"),
+            handoffRetryDelay = { Duration.ofSeconds(5) },
+            serverReviewResolver = serverReviewResolver,
         )
     }
 
