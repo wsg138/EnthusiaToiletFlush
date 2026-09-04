@@ -25,7 +25,7 @@ class NetworkRestartHandoffSafetyTest {
     private val smp = ServerId("SMP")
 
     @Test
-    fun `mismatched published handoff baseline fails closed before action starts`() {
+    fun `mismatched dispatch baseline fails closed before delivery becomes executable`() {
         val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
         val boots = mutableMapOf(
             hub to UUID.fromString("40000000-0000-0000-0000-000000000001"),
@@ -47,8 +47,12 @@ class NetworkRestartHandoffSafetyTest {
         service.tick(warningAt.plusSeconds(2))
         assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
         assertThat(plan.actionStarted).isFalse()
+        assertThat(plan.targetResults[NetworkRestartService.SERVER_HANDOFF_PROTOCOL_KEY])
+            .isEqualTo(NetworkRestartService.SERVER_HANDOFF_PREPARED_V2)
 
-        assertThat(service.markBackendHandoffPublished(smp, UUID.randomUUID())).isFalse()
+        assertThat(
+            service.commitBackendHandoffDispatch(smp, UUID.randomUUID(), warningAt.plusSeconds(3)),
+        ).isFalse()
         assertThat(plan.state).isEqualTo(PlanState.NEEDS_REVIEW)
         assertThat(plan.actionStarted).isFalse()
         assertThat(plan.failure).contains("baseline")
@@ -90,8 +94,13 @@ class NetworkRestartHandoffSafetyTest {
         service.tick(warningAt.plusSeconds(4))
 
         assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
-        assertThat(service.markBackendHandoffPublished(smp, expectedBoot)).isTrue()
+        assertThat(
+            service.commitBackendHandoffDispatch(smp, expectedBoot, warningAt.plusSeconds(4)),
+        ).isTrue()
         assertThat(plan.actionStarted).isTrue()
+        assertThat(plan.targetResults[NetworkRestartService.SERVER_HANDOFF_PROTOCOL_KEY])
+            .isEqualTo(NetworkRestartService.SERVER_HANDOFF_COMMITTED_V2)
+        assertThat(plan.targetResults[smp.value]).contains("dispatch committed")
         assertThat(resets).isEmpty()
     }
 
@@ -137,7 +146,7 @@ class NetworkRestartHandoffSafetyTest {
     }
 
     @Test
-    fun `changed companion before publication aborts without restarting replacement JVM`() {
+    fun `changed companion before dispatch commit aborts without restarting replacement JVM`() {
         val expectedBoot = UUID.fromString("40000000-0000-0000-0000-000000000002")
         val replacementBoot = UUID.fromString("40000000-0000-0000-0000-000000000003")
         val boots = mutableMapOf(
