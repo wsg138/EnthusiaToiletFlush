@@ -310,7 +310,7 @@ class NetworkRestartServiceTest {
     }
 
     @Test
-    fun `server completion requires published handoff and changed companion boot id`() {
+    fun `server completion requires committed handoff and changed companion boot id`() {
         val boots = mutableMapOf(
             hub to UUID.fromString("30000000-0000-0000-0000-000000000001"),
             smp to UUID.fromString("30000000-0000-0000-0000-000000000002"),
@@ -323,7 +323,9 @@ class NetworkRestartServiceTest {
         assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
         assertThat(plan.actionStarted).isFalse()
 
-        assertThat(service.markBackendHandoffPublished(smp, boots.getValue(smp))).isTrue()
+        assertThat(
+            service.commitBackendHandoffDispatch(smp, boots.getValue(smp), now.plusSeconds(2)),
+        ).isTrue()
         service.tick(now.plusSeconds(3))
         assertThat(plan.state).isEqualTo(PlanState.DISPATCHING)
 
