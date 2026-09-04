@@ -218,9 +218,9 @@ class QueueRestartPlugin @Inject constructor(
             pendingArmStore = pendingArmStore,
             options = backendOptions,
             companionIdentity = freshCompanionIdentity,
-            onRestartPublished = { target, baseline ->
+            onRestartDispatchCommitted = { target, baseline, now ->
                 if (networkServiceReady.get()) {
-                    networkService.markBackendHandoffPublished(target, baseline)
+                    networkService.commitBackendHandoffDispatch(target, baseline, now)
                 } else {
                     false
                 }
@@ -274,6 +274,7 @@ class QueueRestartPlugin @Inject constructor(
             prepareBackendHandoff = orchestrator::prepareRestartHandoff,
             currentProxyBootId = proxyBootId,
             executionTimeout = { Duration.ofSeconds(cfgSnapshot().controlSecurity.backendExecutionTimeoutSeconds) },
+            handoffRetryDelay = { Duration.ofSeconds(cfgSnapshot().controlSecurity.heartbeatTimeoutSeconds) },
             serverReviewResolver = { target -> orchestrator.resolveAfterManualReview(target) },
         )
         networkServiceReady.set(true)
