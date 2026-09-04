@@ -55,7 +55,7 @@ class RestartOrchestrator(
     private val pendingArmStore: PendingArmStore = PendingArmStore(),
     private val options: BackendRestartOptions = BackendRestartOptions(),
     private val companionIdentity: (ServerId) -> UUID? = { null },
-    private val onRestartDispatchCommitted: (ServerId, UUID) -> Boolean = { _, _ -> true },
+    private val onRestartDispatchCommitted: (ServerId, UUID, Instant) -> Boolean = { _, _, _ -> true },
 ) {
 
     private data class TargetState(
@@ -305,7 +305,7 @@ class RestartOrchestrator(
             // through PendingArmStore. A proxy crash before this callback is
             // therefore provably pre-delivery; a crash after it remains
             // intentionally fail-closed because Paper may already have polled.
-            if (!onRestartDispatchCommitted(target, preparedBaseline)) return
+            if (!onRestartDispatchCommitted(target, preparedBaseline, now)) return
 
             val deliveryId = pendingArmStore.put(
                 target,
