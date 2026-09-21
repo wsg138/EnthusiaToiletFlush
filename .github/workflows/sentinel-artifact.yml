@@ -1,0 +1,42 @@
+name: Sentinel artifact
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact pull-request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Java 21
+        uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Build and test Paper companion
+        run: |
+          chmod +x gradlew
+          ./gradlew :paper-companion:check :paper-companion:shadowJar --no-daemon
+      - name: Stage stable Sentinel artifact
+        run: |
+          mapfile -t jars < <(find paper-companion/build/libs -maxdepth 1 -type f -name 'paper-companion-*.jar' ! -name '*-plain.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -print | sort)
+          test "${#jars[@]}" -eq 1
+          cp "${jars[0]}" plugin.jar
+          jar tf plugin.jar | grep -Fxq 'plugin.yml'
+      - name: Upload Sentinel artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: enthusiatoiletflush-sentinel-paper
+          path: plugin.jar
+          if-no-files-found: error
+          retention-days: 14
