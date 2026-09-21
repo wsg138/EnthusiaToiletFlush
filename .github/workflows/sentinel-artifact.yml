@@ -26,10 +26,12 @@ jobs:
       - name: Build and test Paper companion
         run: |
           chmod +x gradlew
-          ./gradlew :paper-companion:check :paper-companion:shadowJar --no-daemon -PreleaseVersion=9.8.7
+          ./gradlew :paper-companion:check :paper-companion:shadowJar --no-daemon
       - name: Stage stable Sentinel artifact
         run: |
-          cp paper-companion/build/libs/paper-companion-9.8.7.jar plugin.jar
+          mapfile -t jars < <(find paper-companion/build/libs -maxdepth 1 -type f -name 'paper-companion-*.jar' ! -name '*-plain.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -print | sort)
+          test "${#jars[@]}" -eq 1
+          cp "${jars[0]}" plugin.jar
           jar tf plugin.jar | grep -Fxq 'plugin.yml'
       - name: Upload Sentinel artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
