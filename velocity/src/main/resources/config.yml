@@ -47,10 +47,17 @@ countdown:
     <gold>[Server] <gray>The scheduled <yellow><server></yellow> restart has been cancelled.</gray>
     <dark_gray><strikethrough>--------------------------------------------------</strikethrough>
 
+# Optional hard proxy-level access restrictions for internal backends.
+# Players need the mapped permission even if they can otherwise issue a transfer.
+restricted-backends: {}
+
 access-messages:
   backend-restarting: |-
     <red><bold><server> is restarting</bold></red>
     <gray>The restart begins after the transfer queue finishes. Please try again shortly.</gray>
+  backend-restricted: |-
+    <red><bold>Access denied</bold></red>
+    <gray>You do not have permission to join <server>.</gray>
   backend-whitelisted: |-
     <yellow><bold><server> is temporarily unavailable</bold></yellow>
     <gray>The server is currently whitelisted. Please try again later.</gray>

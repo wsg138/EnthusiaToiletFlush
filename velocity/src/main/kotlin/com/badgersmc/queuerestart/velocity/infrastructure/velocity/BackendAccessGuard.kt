@@ -33,10 +33,23 @@ class BackendAccessGuard(
     @Subscribe(order = PostOrder.LAST)
     fun onPreConnect(event: ServerPreConnectEvent) {
         if (!event.result.isAllowed) return
-        if (event.player.hasPermission("queuerestart.bypass.maintenance")) return
-
         val target = event.result.server.orElse(event.originalServer)
-        if (!restartBlocksConnections(ServerId(target.serverInfo.name))) return
+        val targetId = ServerId(target.serverInfo.name)
+
+        val requiredPermission = BackendRestrictionPolicy.requiredPermission(config(), targetId)
+        if (requiredPermission != null && !event.player.hasPermission(requiredPermission)) {
+            event.player.sendMessage(
+                renderer.render(
+                    config().accessMessages.backendRestricted,
+                    mapOf("server" to target.serverInfo.name),
+                ),
+            )
+            event.result = ServerPreConnectEvent.ServerResult.denied()
+            return
+        }
+
+        if (event.player.hasPermission("queuerestart.bypass.maintenance")) return
+        if (!restartBlocksConnections(targetId)) return
 
         event.player.sendMessage(
             renderer.render(
@@ -97,6 +110,13 @@ class BackendAccessGuard(
             RestartState.SERVER_DOWN,
         )
     }
+}
+
+internal object BackendRestrictionPolicy {
+    fun requiredPermission(config: QueueRestartConfig, target: ServerId): String? =
+        config.restrictedBackends.entries.firstOrNull {
+            it.key.value.equals(target.value, ignoreCase = true)
+        }?.value
 }
 
 internal object BackendKickReasonClassifier {

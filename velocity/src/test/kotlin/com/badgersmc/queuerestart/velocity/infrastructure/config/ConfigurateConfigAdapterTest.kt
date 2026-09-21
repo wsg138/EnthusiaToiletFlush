@@ -45,8 +45,12 @@ class ConfigurateConfigAdapterTest {
           message: "<gold>warning"
           message-t0: "<red>now"
           cancel-message: "<green>cancelled"
+        restricted-backends:
+          TEST: enthusia.access.test
+          BUILD: enthusia.access.build
         access-messages:
           backend-restarting: "<red><server> restart"
+          backend-restricted: "<red><server> restricted"
           backend-whitelisted: "<yellow><server> whitelist"
           drain-disconnect: "<red><server> disconnected"
           network-maintenance: "<red>network maintenance"
@@ -109,6 +113,9 @@ class ConfigurateConfigAdapterTest {
         assertThat(cfg.rejoin.checkGateTimeoutSeconds).isEqualTo(60)
         assertThat(cfg.countdown.marksSeconds).containsExactly(60, 30, 10, 5, 1)
         assertThat(cfg.accessMessages.backendRestarting).contains("<server>").contains("restart")
+        assertThat(cfg.accessMessages.backendRestricted).contains("restricted")
+        assertThat(cfg.restrictedBackends[ServerId("TEST")]).isEqualTo("enthusia.access.test")
+        assertThat(cfg.restrictedBackends[ServerId("BUILD")]).isEqualTo("enthusia.access.build")
         assertThat(cfg.accessMessages.backendWhitelisted).contains("whitelist")
         assertThat(cfg.sounds).containsKey("warn").containsKey("tick")
         assertThat(cfg.sounds["tick"]!!.volume).isEqualTo(0.7f)
@@ -121,7 +128,7 @@ class ConfigurateConfigAdapterTest {
     @Test
     fun `missing access messages use safe defaults`(@TempDir dir: Path) {
         val withoutMessages = canonical.replace(
-            Regex("(?m)^access-messages:\n(?:  .+\n){4}"),
+            Regex("(?m)^access-messages:\n(?:  .+\n){5}"),
             "",
         )
 

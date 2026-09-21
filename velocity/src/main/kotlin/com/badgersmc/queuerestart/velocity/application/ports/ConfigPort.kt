@@ -18,6 +18,7 @@ data class QueueRestartConfig(
     val drain: DrainConfig,
     val rejoin: RejoinConfig,
     val countdown: CountdownConfig,
+    val restrictedBackends: Map<ServerId, String> = emptyMap(),
     val accessMessages: AccessMessagesConfig = AccessMessagesConfig.defaults(),
     val sounds: Map<String, SoundCue>,
     val rankLadder: Map<String, Int>,
@@ -88,6 +89,7 @@ data class DrainConfig(
 
 data class AccessMessagesConfig(
     val backendRestarting: String,
+    val backendRestricted: String,
     val backendWhitelisted: String,
     val drainDisconnect: String,
     val networkMaintenance: String,
@@ -95,6 +97,7 @@ data class AccessMessagesConfig(
     companion object {
         fun defaults() = AccessMessagesConfig(
             backendRestarting = "<red><bold><server> is restarting</bold></red>\n<gray>Please try again shortly.</gray>",
+            backendRestricted = "<red><bold>Access denied</bold></red>\n<gray>You do not have permission to join <server>.</gray>",
             backendWhitelisted = "<yellow><bold><server> is temporarily unavailable</bold></yellow>\n<gray>The server is currently whitelisted.</gray>",
             drainDisconnect = "<red><bold><server> is restarting</bold></red>\n<gray>You were disconnected because a lobby transfer was not available.</gray>",
             networkMaintenance = "<red><bold>Network restart in progress</bold></red>\n<gray>Please reconnect shortly.</gray>",

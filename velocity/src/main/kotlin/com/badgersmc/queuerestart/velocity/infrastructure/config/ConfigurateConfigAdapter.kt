@@ -50,6 +50,7 @@ class ConfigurateConfigAdapter(
             drain = parseDrain(root.node("drain")),
             rejoin = parseRejoin(root.node("rejoin")),
             countdown = parseCountdown(root.node("countdown")),
+            restrictedBackends = parseRestrictedBackends(root.node("restricted-backends")),
             accessMessages = parseAccessMessages(root.node("access-messages")),
             sounds = parseSounds(root.node("sounds")),
             rankLadder = parseRankLadder(root.node("rank-ladder")),
@@ -283,6 +284,7 @@ class ConfigurateConfigAdapter(
             cfg.countdown.messageT0,
             cfg.countdown.cancelMessage,
             cfg.accessMessages.backendRestarting,
+            cfg.accessMessages.backendRestricted,
             cfg.accessMessages.backendWhitelisted,
             cfg.accessMessages.drainDisconnect,
             cfg.accessMessages.networkMaintenance,
@@ -292,11 +294,26 @@ class ConfigurateConfigAdapter(
         }
     }
 
+    private fun parseRestrictedBackends(node: ConfigurationNode): Map<ServerId, String> {
+        if (node.virtual()) return emptyMap()
+        require(node.childrenMap().size <= 32) { "restricted-backends must contain at most 32 entries" }
+        val out = linkedMapOf<ServerId, String>()
+        for ((rawServer, child) in node.childrenMap()) {
+            val server = rawServer.toString()
+            require(server.matches(SERVER_ID_REGEX)) { "invalid restricted backend name '$server'" }
+            val permission = child.requireString()
+            require(permission.matches(PERMISSION_REGEX)) { "invalid restricted backend permission '$permission'" }
+            out[ServerId(server)] = permission
+        }
+        return out
+    }
+
     private fun parseAccessMessages(node: ConfigurationNode): AccessMessagesConfig {
         val defaults = AccessMessagesConfig.defaults()
         if (node.virtual()) return defaults
         return AccessMessagesConfig(
             backendRestarting = node.node("backend-restarting").getString(defaults.backendRestarting),
+            backendRestricted = node.node("backend-restricted").getString(defaults.backendRestricted),
             backendWhitelisted = node.node("backend-whitelisted").getString(defaults.backendWhitelisted),
             drainDisconnect = node.node("drain-disconnect").getString(defaults.drainDisconnect),
             networkMaintenance = node.node("network-maintenance").getString(defaults.networkMaintenance),
@@ -349,6 +366,7 @@ class ConfigurateConfigAdapter(
     companion object {
         private const val MAX_CONFIG_BYTES = 1024L * 1024L
         private val SERVER_ID_REGEX = Regex("[A-Za-z0-9_.-]{1,64}")
+        private val PERMISSION_REGEX = Regex("[A-Za-z0-9_.+:-]{1,128}")
         private val PANEL_ID_REGEX = Regex("[A-Za-z0-9_-]{4,64}")
     }
 }

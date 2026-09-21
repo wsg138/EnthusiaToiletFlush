@@ -36,6 +36,7 @@ import com.badgersmc.queuerestart.velocity.infrastructure.command.QRestartAdminC
 import com.badgersmc.queuerestart.velocity.infrastructure.command.LastRestartCommand
 import com.badgersmc.queuerestart.velocity.infrastructure.command.SchedRestartCommand
 import com.badgersmc.queuerestart.velocity.infrastructure.command.PublicRestartStatusCommand
+import com.badgersmc.queuerestart.velocity.infrastructure.command.RestrictedServerCommand
 import com.badgersmc.queuerestart.velocity.infrastructure.config.ConfigurateConfigAdapter
 import com.badgersmc.queuerestart.velocity.infrastructure.messaging.PluginMessageAdapter
 import com.badgersmc.queuerestart.velocity.infrastructure.messaging.PluginMessageTransport
@@ -309,6 +310,8 @@ class QueueRestartPlugin @Inject constructor(
         registerSimpleCommand("nextrestart", PublicRestartStatusCommand(networkService, cfgSnapshot, false))
         registerSimpleCommand("restartschedule", PublicRestartStatusCommand(networkService, cfgSnapshot, true))
         registerSimpleCommand("lastrestart", LastRestartCommand(networkService, cfgSnapshot))
+        proxy.commandManager.unregister("server")
+        registerSimpleCommand("server", RestrictedServerCommand(proxy, cfgSnapshot))
 
         // ── 1 Hz proxy tick ──────────────────────────────────────────────
         proxy.scheduler.buildTask(this, Runnable {
