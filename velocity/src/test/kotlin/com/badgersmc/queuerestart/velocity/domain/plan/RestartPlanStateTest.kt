@@ -8,6 +8,18 @@ import kotlin.test.assertEquals
 class RestartPlanStateTest {
     @Test
     fun `every plan state has explicit active cancellable and scheduling semantics`() {
+        val reviewedStates = setOf(
+            PlanState.SCHEDULED,
+            PlanState.COUNTING_DOWN,
+            PlanState.PREFLIGHT,
+            PlanState.TRANSFERRING,
+            PlanState.DISPATCHING,
+            PlanState.COMPLETED,
+            PlanState.CANCELLED,
+            PlanState.FAILED,
+            PlanState.MISSED,
+            PlanState.NEEDS_REVIEW,
+        )
         val active = setOf(
             PlanState.SCHEDULED,
             PlanState.COUNTING_DOWN,
@@ -18,7 +30,7 @@ class RestartPlanStateTest {
         val cancellable = setOf(PlanState.SCHEDULED, PlanState.COUNTING_DOWN)
         val blocksScheduling = active + PlanState.NEEDS_REVIEW
 
-        assertEquals(PlanState.entries.toSet(), (active + (PlanState.entries.toSet() - active)))
+        assertEquals(reviewedStates, PlanState.entries.toSet(), "new states require an explicit policy decision")
 
         PlanState.entries.forEach { state ->
             val plan = plan(state)
