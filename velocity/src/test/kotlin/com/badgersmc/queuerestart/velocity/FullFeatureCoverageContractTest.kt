@@ -2,8 +2,8 @@ package com.badgersmc.queuerestart.velocity
 
 import java.nio.file.Files
 import java.nio.file.Path
-import kotlin.test.Test
-import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
 
 /** Keeps the major restart/control feature families attached to concrete regression suites. */
 class FullFeatureCoverageContractTest {
