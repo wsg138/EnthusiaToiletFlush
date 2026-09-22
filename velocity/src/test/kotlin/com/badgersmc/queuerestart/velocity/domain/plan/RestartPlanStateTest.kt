@@ -2,8 +2,8 @@ package com.badgersmc.queuerestart.velocity.domain.plan
 
 import com.badgersmc.queuerestart.velocity.domain.id.ServerId
 import java.time.Instant
-import kotlin.test.Test
-import kotlin.test.assertEquals
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Test
 
 class RestartPlanStateTest {
     @Test
